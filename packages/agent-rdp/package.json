@@ -28,6 +28,7 @@
   ],
   "scripts": {
     "build:ts": "tsc",
+    "test": "node --test --test-timeout=20000",
     "prepublishOnly": "npm run build:ts"
   },
   "keywords": [

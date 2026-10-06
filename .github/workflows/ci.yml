@@ -67,6 +67,7 @@ jobs:
           filters: |
             ts:
               - 'packages/agent-rdp/src/**/*.ts'
+              - 'packages/agent-rdp/test/**'
               - 'packages/agent-rdp/package.json'
               - 'packages/agent-rdp/tsconfig.json'
               - 'package.json'
@@ -97,6 +98,10 @@ jobs:
       - name: TypeScript check
         if: steps.filter.outputs.ts == 'true'
         run: pnpm run build:ts
+
+      - name: TypeScript tests
+        if: steps.filter.outputs.ts == 'true'
+        run: pnpm --filter agent-rdp run test
 
       - name: Skip message
         if: steps.filter.outputs.ts != 'true'
