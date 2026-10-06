@@ -25,7 +25,26 @@ pub async fn run(
     let manager = SessionManager::new(session.to_string());
     let mut client = manager.ensure_daemon().await?;
 
-    let request = Request::Connect(ConnectRequest {
+    let request = Request::Connect(build_connect_request(args, password, drives, stream_port));
+
+    let response = client.send(&request, timeout_ms).await?;
+    output.print_response(&response);
+
+    if !response.success {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Map parsed CLI arguments onto the connect request sent to the daemon.
+fn build_connect_request(
+    args: ConnectArgs,
+    password: String,
+    drives: Vec<DriveMapping>,
+    stream_port: u16,
+) -> ConnectRequest {
+    ConnectRequest {
         host: args.host,
         port: args.port,
         username: args.username,
@@ -40,16 +59,7 @@ pub async fn run(
         // CLI enables the viewer HTML when streaming is enabled
         serve_viewer: stream_port > 0,
         ..Default::default()
-    });
-
-    let response = client.send(&request, timeout_ms).await?;
-    output.print_response(&response);
-
-    if !response.success {
-        std::process::exit(1);
     }
-
-    Ok(())
 }
 
 /// Parse drive mapping strings (format: /path:DriveName) into DriveMappings.
@@ -137,4 +147,66 @@ fn get_password(args: &ConnectArgs, output: &Output) -> anyhow::Result<String> {
         "Password required. Use --password, AGENT_RDP_PASSWORD env var, or --password-stdin",
     );
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{Cli, Commands};
+    use clap::Parser;
+
+    const PSM_SHELL: &str = "psm /u a@b /a host /c PSM-RDP";
+
+    fn parse_connect(extra: &[&str]) -> ConnectArgs {
+        let mut argv = vec!["agent-rdp", "connect", "--host", "h", "-u", "user"];
+        argv.extend_from_slice(extra);
+        match Cli::try_parse_from(argv).expect("args parse").command {
+            Commands::Connect(args) => args,
+            _ => panic!("expected connect command"),
+        }
+    }
+
+    fn request_for(extra: &[&str]) -> ConnectRequest {
+        build_connect_request(parse_connect(extra), "pw".to_string(), Vec::new(), 0)
+    }
+
+    #[test]
+    fn alternate_shell_flag_round_trips_verbatim() {
+        let request = request_for(&["--alternate-shell", PSM_SHELL]);
+        assert_eq!(request.alternate_shell.as_deref(), Some(PSM_SHELL));
+    }
+
+    #[test]
+    fn alternate_shell_flag_equals_form_round_trips_verbatim() {
+        let flag = format!("--alternate-shell={PSM_SHELL}");
+        let request = request_for(&[flag.as_str()]);
+        assert_eq!(request.alternate_shell.as_deref(), Some(PSM_SHELL));
+    }
+
+    #[test]
+    fn alternate_shell_absent_flag_is_none() {
+        assert_eq!(request_for(&[]).alternate_shell, None);
+    }
+
+    #[test]
+    fn connect_request_carries_other_cli_fields() {
+        let request = build_connect_request(
+            parse_connect(&["--port", "4489", "-d", "CORP", "--width", "1920", "--height", "1080"]),
+            "pw".to_string(),
+            vec![DriveMapping {
+                path: "/tmp/x".to_string(),
+                name: "X".to_string(),
+            }],
+            9224,
+        );
+        assert_eq!(request.host, "h");
+        assert_eq!(request.port, 4489);
+        assert_eq!(request.username, "user");
+        assert_eq!(request.password, "pw");
+        assert_eq!(request.domain.as_deref(), Some("CORP"));
+        assert_eq!((request.width, request.height), (1920, 1080));
+        assert_eq!(request.drives.len(), 1);
+        assert_eq!(request.stream_port, 9224);
+        assert!(request.serve_viewer);
+    }
 }

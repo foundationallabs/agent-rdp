@@ -2,14 +2,37 @@
 
 use std::sync::Arc;
 
-use agent_rdp_protocol::{ConnectRequest, ErrorCode, Response, ResponseData};
+use agent_rdp_protocol::{ConnectRequest, DriveMapping, ErrorCode, Response, ResponseData};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::automation::{AutomationBootstrap, SharedAutomationState};
+use crate::automation::{AutomationBootstrap, SharedAutomationState, SharedDvcState};
 use crate::daemon::{ClipboardChangedRx, SharedWsHandle};
 use crate::rdp_session::{DisconnectNotify, RdpConfig, RdpSession};
 use crate::ws_server::{WsServer, WsServerConfig};
+
+/// Map a connect request onto the RDP session configuration.
+///
+/// `drives` is passed separately because the handler appends the automation drive to the
+/// request's own drive list before connecting.
+fn build_rdp_config(
+    params: ConnectRequest,
+    drives: Vec<DriveMapping>,
+    automation_dvc_state: Option<SharedDvcState>,
+) -> RdpConfig {
+    RdpConfig {
+        host: params.host,
+        port: params.port,
+        username: params.username,
+        password: params.password,
+        domain: params.domain,
+        alternate_shell: params.alternate_shell,
+        width: params.width,
+        height: params.height,
+        drives,
+        automation_dvc_state,
+    }
+}
 
 /// Handle a connect request.
 pub async fn handle(
@@ -88,18 +111,7 @@ pub async fn handle(
     };
 
     // Build configuration
-    let config = RdpConfig {
-        host: params.host.clone(),
-        port: params.port,
-        username: params.username,
-        password: params.password,
-        domain: params.domain,
-        alternate_shell: params.alternate_shell,
-        width: params.width,
-        height: params.height,
-        drives,
-        automation_dvc_state,
-    };
+    let config = build_rdp_config(params, drives, automation_dvc_state);
 
     // Attempt connection
     let rdp = match RdpSession::connect(config, Some(disconnect_notify)).await {
@@ -233,5 +245,52 @@ pub async fn handle_disconnect(
         None => {
             Response::error(ErrorCode::NotConnected, "Not connected to an RDP server")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn drive(name: &str) -> DriveMapping {
+        DriveMapping {
+            path: format!("/tmp/{name}"),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn rdp_config_carries_connect_request_fields() {
+        let shell = "psm /u user@domain /a target /c PSM-RDP";
+        let params = ConnectRequest {
+            host: "10.0.0.5".to_string(),
+            port: 4489,
+            username: "admin".to_string(),
+            password: "secret".to_string(),
+            domain: Some("CORP".to_string()),
+            alternate_shell: Some(shell.to_string()),
+            width: 1920,
+            height: 1080,
+            ..Default::default()
+        };
+
+        let config = build_rdp_config(params, vec![drive("docs"), drive("auto")], None);
+
+        assert_eq!(config.host, "10.0.0.5");
+        assert_eq!(config.port, 4489);
+        assert_eq!(config.username, "admin");
+        assert_eq!(config.password, "secret");
+        assert_eq!(config.domain.as_deref(), Some("CORP"));
+        assert_eq!(config.alternate_shell.as_deref(), Some(shell));
+        assert_eq!((config.width, config.height), (1920, 1080));
+        let names: Vec<_> = config.drives.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["docs", "auto"]);
+        assert!(config.automation_dvc_state.is_none());
+    }
+
+    #[test]
+    fn rdp_config_alternate_shell_none_when_unset() {
+        let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None);
+        assert_eq!(config.alternate_shell, None);
     }
 }
