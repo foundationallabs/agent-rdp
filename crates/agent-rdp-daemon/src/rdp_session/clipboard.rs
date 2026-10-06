@@ -54,6 +54,12 @@ impl ClipboardMessageProxy for ChannelProxy {
             ClipboardMessage::SendInitiateCopy(formats) => BackendMessage::InitiateCopy(formats),
             ClipboardMessage::SendFormatData(data) => BackendMessage::FormatData(data),
             ClipboardMessage::SendInitiatePaste(format_id) => BackendMessage::InitiatePaste(format_id),
+            // File transfer over CLIPRDR is not supported; the backend never produces these.
+            ClipboardMessage::SendFileContentsRequest(_)
+            | ClipboardMessage::SendFileContentsResponse(_) => {
+                debug!("Ignoring unsupported clipboard file contents message");
+                return;
+            }
             ClipboardMessage::Error(e) => {
                 warn!("Clipboard backend error: {}", e);
                 return;
