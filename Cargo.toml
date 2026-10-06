@@ -29,16 +29,16 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 
 # IronRDP - use umbrella crate with features
-ironrdp = { version = "0.14", features = ["connector", "session", "input", "graphics"] }
-ironrdp-tokio = "0.8"
-ironrdp-graphics = "0.7"
-ironrdp-cliprdr = "0.5"
-ironrdp-cliprdr-native = "0.5"
-ironrdp-rdpdr = "0.5"
-ironrdp-rdpdr-native = "0.5"
-ironrdp-rdpsnd = "0.7"
-ironrdp-svc = "0.6"
-ironrdp-dvc = "0.5"
+ironrdp = { version = "0.15", features = ["connector", "session", "input", "graphics"] }
+ironrdp-tokio = "0.9"
+ironrdp-graphics = "0.8"
+ironrdp-cliprdr = "0.6"
+ironrdp-cliprdr-native = "0.6"
+ironrdp-rdpdr = "0.6"
+ironrdp-rdpdr-native = "0.6"
+ironrdp-rdpsnd = "0.8"
+ironrdp-svc = "0.7"
+ironrdp-dvc = "0.6"
 
 # Certificate parsing
 x509-cert = "0.2"

@@ -146,6 +146,8 @@ impl RdpSession {
             client_build: 0,
             client_name: "agent-rdp".to_string(),
             client_dir: String::new(),
+            alternate_shell: String::new(),
+            work_dir: String::new(),
             #[cfg(windows)]
             platform: MajorPlatformType::WINDOWS,
             #[cfg(target_os = "macos")]
@@ -162,6 +164,8 @@ impl RdpSession {
             hardware_id: None,
             license_cache: None,
             timezone_info: Default::default(),
+            compression_type: None,
+            multitransport_flags: None,
         };
 
         // Establish TCP connection
