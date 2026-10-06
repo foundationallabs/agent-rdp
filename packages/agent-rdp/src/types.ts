@@ -77,6 +77,11 @@ export interface ConnectOptions {
    * e.g. `psm /u user@domain /a target /c PSM-RDP` for CyberArk PSM.
    */
   alternateShell?: string;
+  /**
+   * Use NLA/CredSSP authentication (default: true). Set to false for servers that only accept
+   * TLS security (RDP `enablecredsspsupport:i:0`), as some CyberArk PSM deployments do.
+   */
+  enableNla?: boolean;
   width?: number;
   height?: number;
   drives?: DriveMapping[];

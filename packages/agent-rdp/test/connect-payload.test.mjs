@@ -84,3 +84,13 @@ test('connect carries the core connection fields', async () => {
   assert.equal(payload.width, 1920);
   assert.equal(payload.height, 1080);
 });
+
+test('connect sends enable_credssp false when enableNla is false', async () => {
+  const payload = await connectPayload({}, { enableNla: false });
+  assert.equal(payload.enable_credssp, false);
+});
+
+test('connect omits enable_credssp when enableNla is unset so the daemon keeps NLA on', async () => {
+  const payload = await connectPayload({}, {});
+  assert.equal('enable_credssp' in payload, false);
+});

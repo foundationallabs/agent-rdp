@@ -27,6 +27,7 @@ fn build_rdp_config(
         password: params.password,
         domain: params.domain,
         alternate_shell: params.alternate_shell,
+        enable_credssp: params.enable_credssp.unwrap_or(true),
         width: params.width,
         height: params.height,
         drives,
@@ -286,6 +287,22 @@ mod tests {
         let names: Vec<_> = config.drives.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["docs", "auto"]);
         assert!(config.automation_dvc_state.is_none());
+    }
+
+    #[test]
+    fn rdp_config_enable_credssp_defaults_to_true() {
+        let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None);
+        assert!(config.enable_credssp);
+    }
+
+    #[test]
+    fn rdp_config_carries_enable_credssp_false() {
+        let params = ConnectRequest {
+            enable_credssp: Some(false),
+            ..Default::default()
+        };
+        let config = build_rdp_config(params, Vec::new(), None);
+        assert!(!config.enable_credssp);
     }
 
     #[test]

@@ -65,6 +65,8 @@ pub struct RdpConfig {
     pub domain: Option<String>,
     /// Alternate shell to start instead of the desktop (e.g. CyberArk PSM).
     pub alternate_shell: Option<String>,
+    /// Negotiate NLA/CredSSP. When false, only TLS security is used.
+    pub enable_credssp: bool,
     pub width: u16,
     pub height: u16,
     /// Drives to map at connect time.
@@ -124,7 +126,7 @@ fn build_connector_config(config: &RdpConfig) -> connector::Config {
         },
         domain: config.domain.clone(),
         enable_tls: true,
-        enable_credssp: true,
+        enable_credssp: config.enable_credssp,
         keyboard_type: KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,
         keyboard_functional_keys_count: 12,
@@ -991,6 +993,7 @@ mod tests {
             password: "pass".to_string(),
             domain: None,
             alternate_shell: alternate_shell.map(str::to_string),
+            enable_credssp: true,
             width: 1280,
             height: 800,
             drives: Vec::new(),
@@ -1004,6 +1007,18 @@ mod tests {
         let config = build_connector_config(&test_config(Some(shell)));
         assert_eq!(config.alternate_shell, shell);
         assert!(config.work_dir.is_empty());
+    }
+
+    #[test]
+    fn connector_config_carries_enable_credssp() {
+        let mut config = test_config(None);
+        assert!(build_connector_config(&config).enable_credssp);
+        assert!(build_connector_config(&config).enable_tls);
+
+        config.enable_credssp = false;
+        let connector = build_connector_config(&config);
+        assert!(!connector.enable_credssp);
+        assert!(connector.enable_tls);
     }
 
     #[test]
