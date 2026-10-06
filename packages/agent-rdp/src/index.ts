@@ -56,6 +56,12 @@ export interface RdpSessionOptions {
   timeout?: number;
   /** WebSocket streaming port (0 = disabled). Connect to ws://localhost:<port> for frames. */
   streamPort?: number;
+  /** Serve the embedded HTML viewer on the streaming port (default: false). */
+  serveViewer?: boolean;
+  /** Streaming frame rate (default: 10). */
+  streamFps?: number;
+  /** Streaming JPEG quality 0-100 (default: 80). */
+  streamQuality?: number;
 }
 
 /**
@@ -194,6 +200,9 @@ export class RdpSession {
   private session: string;
   private timeout: number;
   private streamPort: number;
+  private serveViewer: boolean;
+  private streamFps: number;
+  private streamQuality: number;
   private daemon: DaemonManager;
   private client: IpcClient | null = null;
 
@@ -201,6 +210,9 @@ export class RdpSession {
     this.session = options.session ?? 'default';
     this.timeout = options.timeout ?? 30000;
     this.streamPort = options.streamPort ?? 0;
+    this.serveViewer = options.serveViewer ?? false;
+    this.streamFps = options.streamFps ?? 10;
+    this.streamQuality = options.streamQuality ?? 80;
     this.daemon = new DaemonManager(this.session, this.streamPort);
 
     this.mouse = new MouseController(this);
@@ -240,10 +252,10 @@ export class RdpSession {
       height: options.height ?? 800,
       drives: options.drives ?? [],
       enable_win_automation: options.enableWinAutomation ?? false,
-      stream_port: 0,
-      stream_fps: 10,
-      stream_quality: 80,
-      serve_viewer: false,
+      stream_port: this.streamPort,
+      stream_fps: this.streamFps,
+      stream_quality: this.streamQuality,
+      serve_viewer: this.serveViewer,
     };
 
     const response = await this._send(request);
