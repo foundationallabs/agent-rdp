@@ -72,6 +72,11 @@ export interface ConnectOptions {
   username: string;
   password: string;
   domain?: string;
+  /**
+   * Alternate shell to start instead of the desktop (RDP Client Info `AlternateShell`),
+   * e.g. `psm /u user@domain /a target /c PSM-RDP` for CyberArk PSM.
+   */
+  alternateShell?: string;
   width?: number;
   height?: number;
   drives?: DriveMapping[];

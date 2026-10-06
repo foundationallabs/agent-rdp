@@ -63,6 +63,8 @@ pub struct RdpConfig {
     pub username: String,
     pub password: String,
     pub domain: Option<String>,
+    /// Alternate shell to start instead of the desktop (e.g. CyberArk PSM).
+    pub alternate_shell: Option<String>,
     pub width: u16,
     pub height: u16,
     /// Drives to map at connect time.
@@ -113,6 +115,53 @@ pub struct RdpSession {
 /// Callback type for connection drop notification.
 pub type DisconnectNotify = mpsc::Sender<()>;
 
+/// Build the IronRDP connector config for an RDP connection.
+fn build_connector_config(config: &RdpConfig) -> connector::Config {
+    connector::Config {
+        credentials: Credentials::UsernamePassword {
+            username: config.username.clone(),
+            password: config.password.clone(),
+        },
+        domain: config.domain.clone(),
+        enable_tls: true,
+        enable_credssp: true,
+        keyboard_type: KeyboardType::IbmEnhanced,
+        keyboard_subtype: 0,
+        keyboard_functional_keys_count: 12,
+        keyboard_layout: 0x409, // US English
+        ime_file_name: String::new(),
+        dig_product_id: String::new(),
+        desktop_size: connector::DesktopSize {
+            width: config.width,
+            height: config.height,
+        },
+        bitmap: None,
+        client_build: 0,
+        client_name: "agent-rdp".to_string(),
+        client_dir: String::new(),
+        alternate_shell: config.alternate_shell.clone().unwrap_or_default(),
+        work_dir: String::new(),
+        #[cfg(windows)]
+        platform: MajorPlatformType::WINDOWS,
+        #[cfg(target_os = "macos")]
+        platform: MajorPlatformType::MACINTOSH,
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        platform: MajorPlatformType::UNIX,
+        pointer_software_rendering: true,
+        performance_flags: PerformanceFlags::default(),
+        enable_server_pointer: false,
+        request_data: None,
+        autologon: true,
+        enable_audio_playback: false,
+        desktop_scale_factor: 0,
+        hardware_id: None,
+        license_cache: None,
+        timezone_info: Default::default(),
+        compression_type: None,
+        multitransport_flags: None,
+    }
+}
+
 impl RdpSession {
     /// Establish a new RDP connection.
     ///
@@ -123,50 +172,7 @@ impl RdpSession {
     ) -> Result<Self, RdpError> {
         info!("Connecting to {}:{}", config.host, config.port);
 
-        // Build connector config
-        let connector_config = connector::Config {
-            credentials: Credentials::UsernamePassword {
-                username: config.username.clone(),
-                password: config.password.clone(),
-            },
-            domain: config.domain.clone(),
-            enable_tls: true,
-            enable_credssp: true,
-            keyboard_type: KeyboardType::IbmEnhanced,
-            keyboard_subtype: 0,
-            keyboard_functional_keys_count: 12,
-            keyboard_layout: 0x409, // US English
-            ime_file_name: String::new(),
-            dig_product_id: String::new(),
-            desktop_size: connector::DesktopSize {
-                width: config.width,
-                height: config.height,
-            },
-            bitmap: None,
-            client_build: 0,
-            client_name: "agent-rdp".to_string(),
-            client_dir: String::new(),
-            alternate_shell: String::new(),
-            work_dir: String::new(),
-            #[cfg(windows)]
-            platform: MajorPlatformType::WINDOWS,
-            #[cfg(target_os = "macos")]
-            platform: MajorPlatformType::MACINTOSH,
-            #[cfg(all(not(windows), not(target_os = "macos")))]
-            platform: MajorPlatformType::UNIX,
-            pointer_software_rendering: true,
-            performance_flags: PerformanceFlags::default(),
-            enable_server_pointer: false,
-            request_data: None,
-            autologon: true,
-            enable_audio_playback: false,
-            desktop_scale_factor: 0,
-            hardware_id: None,
-            license_cache: None,
-            timezone_info: Default::default(),
-            compression_type: None,
-            multitransport_flags: None,
-        };
+        let connector_config = build_connector_config(&config);
 
         // Establish TCP connection
         let addr = format!("{}:{}", config.host, config.port);
@@ -971,4 +977,39 @@ fn create_key_event(scancode: u8, extended: bool, release: bool) -> FastPathInpu
         flags |= KeyboardFlags::EXTENDED;
     }
     FastPathInputEvent::KeyboardEvent(flags, scancode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config(alternate_shell: Option<&str>) -> RdpConfig {
+        RdpConfig {
+            host: "host".to_string(),
+            port: 3389,
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            domain: None,
+            alternate_shell: alternate_shell.map(str::to_string),
+            width: 1280,
+            height: 800,
+            drives: Vec::new(),
+            automation_dvc_state: None,
+        }
+    }
+
+    #[test]
+    fn connector_config_carries_alternate_shell() {
+        let shell = "psm /u user@domain /a target /c PSM-RDP";
+        let config = build_connector_config(&test_config(Some(shell)));
+        assert_eq!(config.alternate_shell, shell);
+        assert!(config.work_dir.is_empty());
+    }
+
+    #[test]
+    fn connector_config_alternate_shell_empty_when_none() {
+        let config = build_connector_config(&test_config(None));
+        assert!(config.alternate_shell.is_empty());
+        assert!(config.work_dir.is_empty());
+    }
 }

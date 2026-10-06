@@ -80,6 +80,12 @@ pub struct ConnectRequest {
     #[ts(optional)]
     pub domain: Option<String>,
 
+    /// Alternate shell to start instead of the desktop (RDP Client Info `AlternateShell`).
+    /// For example, CyberArk PSM expects `psm /u user@domain /a target /c PSM-RDP`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub alternate_shell: Option<String>,
+
     /// Desktop width in pixels.
     pub width: u16,
 
@@ -128,6 +134,7 @@ impl Default for ConnectRequest {
             username: String::new(),
             password: String::new(),
             domain: None,
+            alternate_shell: None,
             width: 1280,
             height: 800,
             drives: Vec::new(),
@@ -334,6 +341,33 @@ mod tests {
                 assert_eq!(c.host, "192.168.1.100");
                 assert_eq!(c.port, 3389);
             }
+            _ => panic!("unexpected request type"),
+        }
+    }
+
+    #[test]
+    fn test_connect_without_alternate_shell_deserializes_to_none() {
+        // Payload from a client that predates `alternate_shell`.
+        let json = r#"{"type":"connect","host":"h","port":3389,"username":"u","password":"p",
+            "width":1280,"height":800}"#;
+        match serde_json::from_str::<Request>(json).unwrap() {
+            Request::Connect(c) => assert_eq!(c.alternate_shell, None),
+            _ => panic!("unexpected request type"),
+        }
+    }
+
+    #[test]
+    fn test_connect_alternate_shell_round_trip() {
+        let shell = "psm /u user@domain /a target /c PSM-RDP";
+        let req = Request::Connect(ConnectRequest {
+            alternate_shell: Some(shell.to_string()),
+            ..Default::default()
+        });
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"alternate_shell\""));
+        match serde_json::from_str::<Request>(&json).unwrap() {
+            Request::Connect(c) => assert_eq!(c.alternate_shell.as_deref(), Some(shell)),
             _ => panic!("unexpected request type"),
         }
     }
