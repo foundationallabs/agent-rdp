@@ -58,9 +58,9 @@ export interface RdpSessionOptions {
   streamPort?: number;
   /** Serve the embedded HTML viewer on the streaming port (default: false). */
   serveViewer?: boolean;
-  /** Streaming frame rate (default: 10). */
+  /** Streaming frame rate (default: AGENT_RDP_STREAM_FPS if set, else 10; clamped to 1-60 by the daemon). */
   streamFps?: number;
-  /** Streaming JPEG quality 0-100 (default: 80). */
+  /** Streaming JPEG quality (default: 80; the daemon clamps it to 1-100). */
   streamQuality?: number;
 }
 
@@ -201,7 +201,7 @@ export class RdpSession {
   private timeout: number;
   private streamPort: number;
   private serveViewer: boolean;
-  private streamFps: number;
+  private streamFps: number | undefined;
   private streamQuality: number;
   private daemon: DaemonManager;
   private client: IpcClient | null = null;
@@ -211,7 +211,7 @@ export class RdpSession {
     this.timeout = options.timeout ?? 30000;
     this.streamPort = options.streamPort ?? 0;
     this.serveViewer = options.serveViewer ?? false;
-    this.streamFps = options.streamFps ?? 10;
+    this.streamFps = options.streamFps;
     this.streamQuality = options.streamQuality ?? 80;
     this.daemon = new DaemonManager(this.session, this.streamPort);
 

@@ -51,11 +51,11 @@ enable_win_automation: boolean,
  */
 stream_port: number, 
 /**
- * Streaming frame rate (default: 10).
+ * Streaming frame rate. When unset the daemon uses `AGENT_RDP_STREAM_FPS`, then 10.
  */
-stream_fps: number, 
+stream_fps?: number, 
 /**
- * Streaming JPEG quality 0-100 (default: 80).
+ * Streaming JPEG quality (default: 80). The daemon clamps it to 1-100.
  */
 stream_quality: number, 
 /**

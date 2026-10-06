@@ -1,17 +1,17 @@
 //! Main daemon event loop.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use agent_rdp_protocol::{Request, Response, ResponseData, SessionInfo, ConnectionState, ErrorCode};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, watch, Mutex};
 use tracing::{error, info, warn};
 
 use crate::automation::{new_shared_state, SharedAutomationState};
 use crate::handlers;
 use crate::ipc_server::IpcServer;
 use crate::rdp_session::RdpSession;
-use crate::ws_server::WsServerHandle;
+use crate::ws_server::{frame_interval, WsServerHandle};
 
 /// Shared WebSocket server state that can be started/stopped dynamically.
 pub type SharedWsHandle = Arc<Mutex<Option<WsServerHandle>>>;
@@ -49,7 +49,8 @@ pub struct Daemon {
     ws_handle: SharedWsHandle,
 
     /// WebSocket streaming frame rate (used for frame broadcasting).
-    stream_fps: u32,
+    /// Starts at the env/default value; a connect request can change it.
+    stream_fps_tx: watch::Sender<u32>,
 
     /// Clipboard change notification receiver (set up when RDP connects with WS streaming).
     clipboard_changed_rx: ClipboardChangedRx,
@@ -69,8 +70,8 @@ impl Daemon {
         let (shutdown_tx, _) = broadcast::channel(1);
         let (disconnect_tx, disconnect_rx) = tokio::sync::mpsc::channel(1);
 
-        // Default frame rate (can be overridden by ConnectRequest)
-        let stream_fps = crate::ws_server::get_stream_fps();
+        // Default frame rate (a ConnectRequest can override it)
+        let (stream_fps_tx, _) = watch::channel(crate::ws_server::get_stream_fps(None));
 
         let rdp_session = Arc::new(Mutex::new(None));
 
@@ -96,7 +97,7 @@ impl Daemon {
             disconnect_rx,
             disconnect_tx,
             ws_handle,
-            stream_fps,
+            stream_fps_tx,
             clipboard_changed_rx,
         })
     }
@@ -106,9 +107,13 @@ impl Daemon {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         // Frame broadcast interval for WebSocket streaming
-        let frame_interval = Duration::from_millis(1000 / self.stream_fps.max(1) as u64);
-        let mut frame_timer = tokio::time::interval(frame_interval);
-        frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut stream_fps_rx = self.stream_fps_tx.subscribe();
+        let new_frame_timer = |fps: u32| {
+            let mut timer = tokio::time::interval(frame_interval(fps));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            timer
+        };
+        let mut frame_timer = new_frame_timer(*stream_fps_rx.borrow_and_update());
 
         loop {
             tokio::select! {
@@ -124,9 +129,10 @@ impl Daemon {
                             let shutdown_tx = self.shutdown_tx.clone();
                             let disconnect_tx = self.disconnect_tx.clone();
                             let clipboard_changed_rx = Arc::clone(&self.clipboard_changed_rx);
+                            let stream_fps_tx = self.stream_fps_tx.clone();
 
                             tokio::spawn(async move {
-                                if let Err(e) = handle_client(stream, session, automation_state, ws_handle, session_name, start_time, shutdown_tx, disconnect_tx, clipboard_changed_rx).await {
+                                if let Err(e) = handle_client(stream, session, automation_state, ws_handle, session_name, start_time, shutdown_tx, disconnect_tx, clipboard_changed_rx, stream_fps_tx).await {
                                     error!("Client handler error: {}", e);
                                 }
                             });
@@ -153,6 +159,13 @@ impl Daemon {
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received Ctrl+C, cleaning up...");
                     break;
+                }
+
+                // A connect request changed the stream frame rate
+                Ok(()) = stream_fps_rx.changed() => {
+                    let fps = *stream_fps_rx.borrow_and_update();
+                    info!("Stream frame rate set to {} fps", fps);
+                    frame_timer = new_frame_timer(fps);
                 }
 
                 // Broadcast frames to WebSocket clients
@@ -233,6 +246,7 @@ async fn handle_client(
     shutdown_tx: broadcast::Sender<()>,
     disconnect_tx: tokio::sync::mpsc::Sender<()>,
     clipboard_changed_rx: ClipboardChangedRx,
+    stream_fps_tx: watch::Sender<u32>,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -271,6 +285,7 @@ async fn handle_client(
             start_time,
             &disconnect_tx,
             &clipboard_changed_rx,
+            &stream_fps_tx,
         ).await;
 
         let json = serde_json::to_string(&response)? + "\n";
@@ -298,6 +313,7 @@ async fn process_request(
     start_time: Instant,
     disconnect_tx: &tokio::sync::mpsc::Sender<()>,
     clipboard_changed_rx: &ClipboardChangedRx,
+    stream_fps_tx: &watch::Sender<u32>,
 ) -> Response {
     match request {
         Request::Ping => Response::success(ResponseData::Pong),
@@ -332,7 +348,7 @@ async fn process_request(
         }
 
         Request::Connect(params) => {
-            handlers::connect::handle(rdp_session, automation_state, ws_handle, params, disconnect_tx.clone(), clipboard_changed_rx).await
+            handlers::connect::handle(rdp_session, automation_state, ws_handle, params, disconnect_tx.clone(), clipboard_changed_rx, stream_fps_tx).await
         }
 
         Request::Disconnect => {

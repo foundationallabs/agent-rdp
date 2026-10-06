@@ -95,3 +95,9 @@ test('connect sends the stream options', async () => {
   assert.equal(payload.stream_fps, 25);
   assert.equal(payload.stream_quality, 55);
 });
+
+test('connect omits stream_fps when streamFps is unset so the daemon env/default applies', async () => {
+  const payload = await connectPayload({}, {});
+  assert.equal('stream_fps' in payload, false);
+  assert.equal(payload.stream_quality, 80);
+});

@@ -104,11 +104,12 @@ pub struct ConnectRequest {
     #[serde(default)]
     pub stream_port: u16,
 
-    /// Streaming frame rate (default: 10).
-    #[serde(default = "default_stream_fps")]
-    pub stream_fps: u32,
+    /// Streaming frame rate. When unset the daemon uses `AGENT_RDP_STREAM_FPS`, then 10.
+    #[serde(default)]
+    #[ts(optional)]
+    pub stream_fps: Option<u32>,
 
-    /// Streaming JPEG quality 0-100 (default: 80).
+    /// Streaming JPEG quality (default: 80). The daemon clamps it to 1-100.
     #[serde(default = "default_stream_quality")]
     pub stream_quality: u8,
 
@@ -116,10 +117,6 @@ pub struct ConnectRequest {
     /// When false, only WebSocket connections are accepted.
     #[serde(default)]
     pub serve_viewer: bool,
-}
-
-fn default_stream_fps() -> u32 {
-    10
 }
 
 fn default_stream_quality() -> u8 {
@@ -140,7 +137,7 @@ impl Default for ConnectRequest {
             drives: Vec::new(),
             enable_win_automation: false,
             stream_port: 0,
-            stream_fps: default_stream_fps(),
+            stream_fps: None,
             stream_quality: default_stream_quality(),
             serve_viewer: false,
         }

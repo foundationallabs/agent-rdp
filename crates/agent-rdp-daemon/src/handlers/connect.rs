@@ -3,13 +3,13 @@
 use std::sync::Arc;
 
 use agent_rdp_protocol::{ConnectRequest, DriveMapping, ErrorCode, Response, ResponseData};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tracing::{info, warn};
 
 use crate::automation::{AutomationBootstrap, SharedAutomationState, SharedDvcState};
 use crate::daemon::{ClipboardChangedRx, SharedWsHandle};
 use crate::rdp_session::{DisconnectNotify, RdpConfig, RdpSession};
-use crate::ws_server::{WsServer, WsServerConfig};
+use crate::ws_server::{get_stream_fps, WsServer, WsServerConfig};
 
 /// Map a connect request onto the RDP session configuration.
 ///
@@ -42,6 +42,7 @@ pub async fn handle(
     params: ConnectRequest,
     disconnect_notify: DisconnectNotify,
     clipboard_changed_rx: &ClipboardChangedRx,
+    stream_fps_tx: &watch::Sender<u32>,
 ) -> Response {
     let enable_automation = params.enable_win_automation;
     let stream_port = params.stream_port;
@@ -141,16 +142,18 @@ pub async fn handle(
     if stream_port > 0 {
         let mut ws = ws_handle.lock().await;
         if ws.is_none() {
+            let fps = get_stream_fps(stream_fps);
             let config = WsServerConfig {
                 port: stream_port,
-                fps: stream_fps,
+                fps,
                 jpeg_quality: stream_quality,
                 serve_viewer,
             };
             let ws_server = WsServer::new(config);
             match ws_server.start(Arc::clone(rdp_session)).await {
                 Ok(handle) => {
-                    info!("WebSocket streaming enabled on port {}", stream_port);
+                    info!("WebSocket streaming enabled on port {} at {} fps", stream_port, fps);
+                    stream_fps_tx.send_replace(fps);
                     *ws = Some(handle);
 
                     // Set up clipboard change notification channel

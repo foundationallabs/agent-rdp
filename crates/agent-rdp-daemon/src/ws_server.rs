@@ -19,6 +19,16 @@ use tracing::{debug, error, info};
 use crate::rdp_session::RdpSession;
 use crate::ws_input::{keyboard_to_fastpath, mouse_to_fastpath, ClipboardContent, WsInputMessage};
 
+/// Stream frame rate used when neither the connect request nor `AGENT_RDP_STREAM_FPS` sets one.
+pub const DEFAULT_STREAM_FPS: u32 = 10;
+
+/// Upper bound for the stream frame rate (keeps the frame interval non-zero).
+pub const MAX_STREAM_FPS: u32 = 60;
+
+/// JPEG quality range accepted by the encoder.
+const MIN_JPEG_QUALITY: u8 = 1;
+const MAX_JPEG_QUALITY: u8 = 100;
+
 /// Embedded viewer HTML.
 const VIEWER_HTML: &str = include_str!("../../../assets/viewer/viewer.html");
 
@@ -95,7 +105,7 @@ impl Default for WsServerConfig {
     fn default() -> Self {
         Self {
             port: 9224,
-            fps: 10,
+            fps: DEFAULT_STREAM_FPS,
             jpeg_quality: 80,
             serve_viewer: false,
         }
@@ -107,7 +117,7 @@ impl WsServer {
     pub fn new(config: WsServerConfig) -> Self {
         Self {
             port: config.port,
-            jpeg_quality: config.jpeg_quality,
+            jpeg_quality: config.jpeg_quality.clamp(MIN_JPEG_QUALITY, MAX_JPEG_QUALITY),
             serve_viewer: config.serve_viewer,
             clients: Arc::new(Mutex::new(HashSet::new())),
             next_client_id: Arc::new(Mutex::new(0)),
@@ -549,12 +559,24 @@ pub fn get_stream_port() -> u16 {
         .unwrap_or(0)
 }
 
-/// Get the stream FPS from environment or default.
-pub fn get_stream_fps() -> u32 {
-    std::env::var("AGENT_RDP_STREAM_FPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10)
+/// Resolve the stream FPS: connect request, then `AGENT_RDP_STREAM_FPS`, then the default.
+///
+/// The result is clamped to `1..=MAX_STREAM_FPS`.
+pub fn resolve_stream_fps(request: Option<u32>, env: Option<&str>) -> u32 {
+    request
+        .or_else(|| env.and_then(|s| s.trim().parse().ok()))
+        .unwrap_or(DEFAULT_STREAM_FPS)
+        .clamp(1, MAX_STREAM_FPS)
+}
+
+/// Get the stream FPS for an optional connect-request value (see [`resolve_stream_fps`]).
+pub fn get_stream_fps(request: Option<u32>) -> u32 {
+    resolve_stream_fps(request, std::env::var("AGENT_RDP_STREAM_FPS").ok().as_deref())
+}
+
+/// Interval between broadcast frames at the given FPS.
+pub fn frame_interval(fps: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(1000 / u64::from(fps.clamp(1, MAX_STREAM_FPS)))
 }
 
 /// Get the stream JPEG quality from environment or default.
@@ -563,4 +585,58 @@ pub fn get_stream_quality() -> u8 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(80)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_fps_request_beats_env_and_default() {
+        assert_eq!(resolve_stream_fps(Some(25), Some("30")), 25);
+        assert_eq!(resolve_stream_fps(Some(25), None), 25);
+    }
+
+    #[test]
+    fn stream_fps_env_beats_default() {
+        assert_eq!(resolve_stream_fps(None, Some("30")), 30);
+        assert_eq!(resolve_stream_fps(None, Some(" 15 ")), 15);
+    }
+
+    #[test]
+    fn stream_fps_falls_back_to_default() {
+        assert_eq!(resolve_stream_fps(None, None), DEFAULT_STREAM_FPS);
+        assert_eq!(resolve_stream_fps(None, Some("not-a-number")), DEFAULT_STREAM_FPS);
+    }
+
+    #[test]
+    fn stream_fps_is_clamped() {
+        assert_eq!(resolve_stream_fps(Some(0), None), 1);
+        assert_eq!(resolve_stream_fps(Some(100_000), None), MAX_STREAM_FPS);
+        assert_eq!(resolve_stream_fps(None, Some("100000")), MAX_STREAM_FPS);
+    }
+
+    #[test]
+    fn frame_interval_is_never_zero() {
+        assert_eq!(frame_interval(10), std::time::Duration::from_millis(100));
+        assert_eq!(frame_interval(0), std::time::Duration::from_millis(1000));
+        assert!(!frame_interval(u32::MAX).is_zero());
+    }
+
+    fn server_with_quality(jpeg_quality: u8) -> WsServer {
+        WsServer::new(WsServerConfig {
+            jpeg_quality,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn jpeg_quality_is_clamped_to_1_100() {
+        assert_eq!(server_with_quality(0).jpeg_quality, 1);
+        assert_eq!(server_with_quality(1).jpeg_quality, 1);
+        assert_eq!(server_with_quality(80).jpeg_quality, 80);
+        assert_eq!(server_with_quality(100).jpeg_quality, 100);
+        assert_eq!(server_with_quality(101).jpeg_quality, 100);
+        assert_eq!(server_with_quality(255).jpeg_quality, 100);
+    }
 }
