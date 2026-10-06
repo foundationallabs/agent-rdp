@@ -91,12 +91,12 @@ jobs:
 
   publish:
     needs: [build-linux, build-darwin]
+    # Publish only from a tag, including manual runs; a branch dispatch builds but does not publish.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write # Required for npm provenance
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
     steps:
       - uses: actions/checkout@v4
@@ -141,13 +141,27 @@ jobs:
               exit 1
             fi
           done
-          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "pace-v$version" ]; then
+          cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$cargo_version" != "$version" ]; then
+            echo "Cargo.toml is $cargo_version, expected $version"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "pace-v$version" ]; then
             echo "Tag $GITHUB_REF_NAME does not match package version $version"
             exit 1
           fi
 
+      - name: Check npm auth
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm whoami
+          npm access list packages @foundationallabs || true
+
       # Platform packages go first so the main package's optionalDependencies resolve as soon as it is live.
       - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for platform in darwin-arm64 linux-x64 linux-arm64; do
             name=$(node -p "require('./packages/$platform/package.json').name")
@@ -161,6 +175,8 @@ jobs:
 
       # npm does not rewrite the `workspace:*` optionalDependencies; the script pins them to the real version.
       - name: Publish main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           name=$(node -p "require('./packages/agent-rdp/package.json').name")
           version=$(node -p "require('./packages/agent-rdp/package.json').version")
