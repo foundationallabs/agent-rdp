@@ -31,6 +31,7 @@ pub async fn run(
         username: args.username,
         password,
         domain: args.domain,
+        alternate_shell: args.alternate_shell,
         width: args.width,
         height: args.height,
         drives,

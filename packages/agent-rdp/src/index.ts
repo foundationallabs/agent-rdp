@@ -220,6 +220,7 @@ export class RdpSession {
    * @param options.username Username for authentication
    * @param options.password Password for authentication
    * @param options.domain Optional domain
+   * @param options.alternateShell Optional alternate shell to start instead of the desktop
    * @param options.width Desktop width (default: 1280)
    * @param options.height Desktop height (default: 800)
    * @param options.drives Drives to map
@@ -236,6 +237,7 @@ export class RdpSession {
       username: options.username,
       password: options.password,
       domain: options.domain,
+      alternate_shell: options.alternateShell,
       width: options.width ?? 1280,
       height: options.height ?? 800,
       drives: options.drives ?? [],

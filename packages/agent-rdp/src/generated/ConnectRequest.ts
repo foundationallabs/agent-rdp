@@ -26,6 +26,11 @@ password: string,
  */
 domain?: string, 
 /**
+ * Alternate shell to start instead of the desktop (RDP Client Info `AlternateShell`).
+ * For example, CyberArk PSM expects `psm /u user@domain /a target /c PSM-RDP`.
+ */
+alternate_shell?: string, 
+/**
  * Desktop width in pixels.
  */
 width: number, 

@@ -175,6 +175,15 @@ agent-rdp drive list
 
 On the remote Windows machine, mapped drives appear in File Explorer as network locations.
 
+### Alternate Shell
+
+Start a specific program instead of the desktop by passing an RDP alternate shell. For example, CyberArk PSM expects its connection string here:
+
+```bash
+agent-rdp connect --host psm.example.com -u user -p secret \
+  --alternate-shell 'psm /u user@domain /a target /c PSM-RDP'
+```
+
 ### UI Automation
 
 Interact with Windows applications programmatically via the Windows UI Automation API using native patterns (InvokePattern, SelectionItemPattern, TogglePattern, etc.). When enabled, a PowerShell agent is injected into the remote session that captures the accessibility tree and performs actions. Communication between the CLI and the agent uses a Dynamic Virtual Channel (DVC) for fast bidirectional IPC.
@@ -333,6 +342,7 @@ await rdp.connect({
   width: 1280,
   height: 800,
   drives: [{ path: '/tmp/share', name: 'Share' }],
+  alternateShell: 'psm /u user@domain /a target /c PSM-RDP',  // Optional: start this instead of the desktop
   enableWinAutomation: true,  // Enable UI Automation
 });
 

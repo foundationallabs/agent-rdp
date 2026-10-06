@@ -109,6 +109,10 @@ pub struct ConnectArgs {
     #[arg(long, short = 'd')]
     pub domain: Option<String>,
 
+    /// Alternate shell to start instead of the desktop (e.g. CyberArk PSM: "psm /u user@domain /a target /c PSM-RDP")
+    #[arg(long, value_name = "STRING")]
+    pub alternate_shell: Option<String>,
+
     /// Desktop width
     #[arg(long, default_value = "1280")]
     pub width: u16,

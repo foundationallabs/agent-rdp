@@ -94,6 +94,7 @@ pub async fn handle(
         username: params.username,
         password: params.password,
         domain: params.domain,
+        alternate_shell: params.alternate_shell,
         width: params.width,
         height: params.height,
         drives,
