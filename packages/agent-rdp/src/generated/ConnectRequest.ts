@@ -31,6 +31,11 @@ domain?: string,
  */
 alternate_shell?: string, 
 /**
+ * Use NLA/CredSSP authentication (default when unset: true).
+ * Set to false for servers that only accept TLS security (RDP `enablecredsspsupport:i:0`).
+ */
+enable_credssp?: boolean, 
+/**
  * Desktop width in pixels.
  */
 width: number, 

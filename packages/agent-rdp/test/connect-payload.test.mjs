@@ -101,3 +101,13 @@ test('connect omits stream_fps when streamFps is unset so the daemon env/default
   assert.equal('stream_fps' in payload, false);
   assert.equal(payload.stream_quality, 80);
 });
+
+test('connect sends enable_credssp false when enableNla is false', async () => {
+  const payload = await connectPayload({}, { enableNla: false });
+  assert.equal(payload.enable_credssp, false);
+});
+
+test('connect omits enable_credssp when enableNla is unset so the daemon keeps NLA on', async () => {
+  const payload = await connectPayload({}, {});
+  assert.equal('enable_credssp' in payload, false);
+});

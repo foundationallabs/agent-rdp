@@ -184,7 +184,7 @@ agent-rdp connect --host psm.example.com -u user -p secret \
   --alternate-shell 'psm /u user@domain /a target /c PSM-RDP'
 ```
 
-The value can also come from the `AGENT_RDP_ALTERNATE_SHELL` environment variable.
+The value can also come from the `AGENT_RDP_ALTERNATE_SHELL` environment variable. PSM deployments that require NLA to be off (TLS security only) can add `--no-nla` (SDK: `enableNla: false`).
 
 ### UI Automation
 

@@ -51,6 +51,8 @@ fn build_connect_request(
         password,
         domain: args.domain,
         alternate_shell: args.alternate_shell,
+        // Unset keeps the daemon default (NLA on)
+        enable_credssp: args.no_nla.then_some(false),
         width: args.width,
         height: args.height,
         drives,
@@ -197,6 +199,16 @@ mod tests {
 
         assert_eq!(from_env.as_deref(), Some(PSM_SHELL));
         assert_eq!(from_flag.as_deref(), Some("other shell"));
+    }
+
+    #[test]
+    fn no_nla_flag_sets_enable_credssp_false() {
+        assert_eq!(request_for(&["--no-nla"]).enable_credssp, Some(false));
+    }
+
+    #[test]
+    fn enable_credssp_stays_unset_without_no_nla() {
+        assert_eq!(request_for(&[]).enable_credssp, None);
     }
 
     #[test]

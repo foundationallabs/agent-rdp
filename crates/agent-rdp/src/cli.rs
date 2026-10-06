@@ -113,6 +113,10 @@ pub struct ConnectArgs {
     #[arg(long, value_name = "STRING", env = "AGENT_RDP_ALTERNATE_SHELL")]
     pub alternate_shell: Option<String>,
 
+    /// Disable NLA/CredSSP and use TLS security only (needed by some CyberArk PSM deployments)
+    #[arg(long)]
+    pub no_nla: bool,
+
     /// Desktop width
     #[arg(long, default_value = "1280")]
     pub width: u16,
