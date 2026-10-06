@@ -15,14 +15,11 @@ const fs = require('fs');
 const path = require('path');
 
 const TARGETS = [
-  // macOS (native cargo, no cross needed)
+  // macOS (native cargo, no cross needed); only the platforms Pace publishes
   { target: 'aarch64-apple-darwin', package: 'darwin-arm64', useCross: false },
-  { target: 'x86_64-apple-darwin', package: 'darwin-x64', useCross: false },
   // Linux
   { target: 'x86_64-unknown-linux-gnu', package: 'linux-x64', useCross: true },
   { target: 'aarch64-unknown-linux-gnu', package: 'linux-arm64', useCross: true },
-  // Windows
-  { target: 'x86_64-pc-windows-gnu', package: 'win32-x64', useCross: true },
 ];
 
 const PROJECT_ROOT = path.join(__dirname, '..');

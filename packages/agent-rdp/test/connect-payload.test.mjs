@@ -1,6 +1,6 @@
 // Verifies the exact IPC payload RdpSession.connect() sends to the daemon.
 // A fake daemon listens on the session's real socket path, so no SDK internals are stubbed.
-// Requires a prior `pnpm --filter agent-rdp run build:ts` (imports from dist/).
+// Requires a prior `pnpm --filter ./packages/agent-rdp run build:ts` (imports from dist/).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

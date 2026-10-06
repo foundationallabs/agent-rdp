@@ -101,7 +101,7 @@ jobs:
 
       - name: TypeScript tests
         if: steps.filter.outputs.ts == 'true'
-        run: pnpm --filter agent-rdp run test
+        run: pnpm --filter ./packages/agent-rdp run test
 
       - name: Skip message
         if: steps.filter.outputs.ts != 'true'

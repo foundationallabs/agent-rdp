@@ -1,0 +1,174 @@
+name: Pace Release
+
+# Publishes @foundationallabs/agent-rdp and its platform packages to npm.
+# Trigger: push a `pace-v*` tag, or run manually. Versions come from the package.json files.
+on:
+  push:
+    tags:
+      - 'pace-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Linux builds run in an ubuntu:22.04 container (glibc 2.35) for broad compatibility.
+  # Without this, ubuntu-latest (24.04) produces binaries requiring glibc 2.39+.
+  build-linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            package: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            package: linux-arm64
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ubuntu:22.04
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y curl build-essential pkg-config cmake
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Build
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Copy binary and models to package
+        run: |
+          mkdir -p packages/${{ matrix.package }}/bin
+          mkdir -p packages/${{ matrix.package }}/models
+          cp target/${{ matrix.target }}/release/agent-rdp packages/${{ matrix.package }}/bin/
+          chmod +x packages/${{ matrix.package }}/bin/agent-rdp
+          cp models/*.rten packages/${{ matrix.package }}/models/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: packages/${{ matrix.package }}/
+
+  build-darwin:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Copy binary and models to package
+        run: |
+          mkdir -p packages/darwin-arm64/bin
+          mkdir -p packages/darwin-arm64/models
+          cp target/aarch64-apple-darwin/release/agent-rdp packages/darwin-arm64/bin/
+          chmod +x packages/darwin-arm64/bin/agent-rdp
+          cp models/*.rten packages/darwin-arm64/models/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64
+          path: packages/darwin-arm64/
+
+  publish:
+    needs: [build-linux, build-darwin]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Required for npm provenance
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Restore platform packages
+        run: |
+          for platform in darwin-arm64 linux-x64 linux-arm64; do
+            cp -r artifacts/$platform/* packages/$platform/
+            chmod +x packages/$platform/bin/*
+          done
+          ls -la packages/*/bin/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm install --ignore-scripts
+
+      - name: Build TypeScript
+        run: pnpm --filter ./packages/agent-rdp run build:ts
+
+      - name: Check versions and tag agree
+        run: |
+          version=$(node -p "require('./packages/agent-rdp/package.json').version")
+          for platform in darwin-arm64 linux-x64 linux-arm64; do
+            v=$(node -p "require('./packages/$platform/package.json').version")
+            if [ "$v" != "$version" ]; then
+              echo "packages/$platform is $v, expected $version"
+              exit 1
+            fi
+          done
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "pace-v$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $version"
+            exit 1
+          fi
+
+      # Platform packages go first so the main package's optionalDependencies resolve as soon as it is live.
+      - name: Publish platform packages
+        run: |
+          for platform in darwin-arm64 linux-x64 linux-arm64; do
+            name=$(node -p "require('./packages/$platform/package.json').name")
+            version=$(node -p "require('./packages/$platform/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published, skipping"
+              continue
+            fi
+            npm publish ./packages/$platform --access public --provenance
+          done
+
+      # npm does not rewrite the `workspace:*` optionalDependencies; the script pins them to the real version.
+      - name: Publish main package
+        run: |
+          name=$(node -p "require('./packages/agent-rdp/package.json').name")
+          version=$(node -p "require('./packages/agent-rdp/package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already published, skipping"
+            exit 0
+          fi
+          cp README.md packages/agent-rdp/
+          node scripts/resolve-workspace-deps.cjs packages/agent-rdp
+          # TypeScript was built above; skip prepublishOnly so publish does not rebuild.
+          npm publish ./packages/agent-rdp --access public --provenance --ignore-scripts

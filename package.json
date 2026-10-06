@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm run build:rust && pnpm run build:ts",
-    "build:ts": "pnpm --filter agent-rdp run build:ts",
+    "build:ts": "pnpm --filter ./packages/agent-rdp run build:ts",
     "build:rust": "cargo build --release && node scripts/copy-native.cjs",
     "build:all": "node scripts/build-all.cjs",
     "cli": "node packages/agent-rdp/bin/cli.js",

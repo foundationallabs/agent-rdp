@@ -232,7 +232,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 ///
 /// Models are always at `bin/../models` relative to the executable:
 /// - Dev: packages/{platform}/bin/agent-rdp -> packages/{platform}/models/
-/// - npm: node_modules/@agent-rdp/{platform}/bin/agent-rdp -> node_modules/@agent-rdp/{platform}/models/
+/// - npm: node_modules/@foundationallabs/agent-rdp-{platform}/bin/agent-rdp -> node_modules/@foundationallabs/agent-rdp-{platform}/models/
 pub fn find_models_dir() -> Result<PathBuf> {
     let exe_path = std::env::current_exe().context("Failed to get executable path")?;
 

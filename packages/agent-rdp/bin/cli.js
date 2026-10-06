@@ -15,7 +15,8 @@ const require = createRequire(import.meta.url);
 const platform = process.platform; // darwin, linux, win32
 const arch = process.arch;         // arm64, x64
 const ext = platform === 'win32' ? '.exe' : '';
-const platformPackage = `@agent-rdp/${platform}-${arch}`;
+// Keep in sync with getPlatformPackage() in src/daemon.ts (this file runs without a build).
+const platformPackage = `@foundationallabs/agent-rdp-${platform}-${arch}`;
 
 let binaryPath;
 

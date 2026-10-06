@@ -36,7 +36,7 @@ agent-rdp is a CLI tool for AI agents to control Windows Remote Desktop sessions
 This is a pnpm workspace monorepo:
 
 - **packages/agent-rdp/** - Main npm package with TypeScript SDK and CLI entry point
-- **packages/{platform}-{arch}/** - Platform-specific packages containing native binaries (e.g., `darwin-arm64`, `linux-x64`, `win32-x64`)
+- **packages/{platform}-{arch}/** - Platform-specific packages containing native binaries (`darwin-arm64`, `linux-x64`, `linux-arm64`)
 
 The main package uses `optionalDependencies` with `os`/`cpu` fields so npm only installs the binary for the user's platform.
 
@@ -109,34 +109,8 @@ Input sent as `FastPathInputEvent` (mouse via `MousePdu`, keyboard via scancode 
 
 ## Release Process
 
-This project uses [release-please](https://github.com/googleapis/release-please) for automated releases.
+This fork publishes `@foundationallabs/agent-rdp` and the platform packages `@foundationallabs/agent-rdp-{linux-x64,linux-arm64,darwin-arm64}` to npm. Upstream's release-please flow is removed.
 
-### Conventional Commits
-
-Use [Conventional Commits](https://www.conventionalcommits.org/) format for commit messages:
-
-```
-feat: add new feature        # Minor version bump, appears in changelog
-fix: fix a bug               # Patch version bump, appears in changelog
-perf: improve performance    # Patch version bump, appears in changelog
-docs: update documentation   # No version bump, appears in changelog
-refactor: restructure code   # No version bump, appears in changelog
-chore: maintenance task      # No version bump, hidden from changelog
-test: add tests              # No version bump, hidden from changelog
-ci: CI changes               # No version bump, hidden from changelog
-```
-
-### Release Workflow
-
-1. Push commits with conventional commit messages to `main`
-2. Release-please creates/updates a "Release PR" with:
-   - Version bump in `package.json` files
-   - Updated `CHANGELOG.md`
-3. Merge the Release PR when ready to publish
-4. Tag creation triggers the release workflow:
-   - Builds binaries for all platforms
-   - Creates GitHub release with binaries
-   - Publishes platform packages (`@agent-rdp/{platform}-{arch}`) to npm
-   - Publishes main package (`agent-rdp`) to npm with provenance
-
-**Manual Release**: If release-please fails to create a release, you can manually trigger the workflow via `workflow_dispatch` with a tag name, or push a tag matching `agent-rdp-v*`.
+1. Set the same version in `Cargo.toml` and the `package.json` of `packages/agent-rdp`, `packages/linux-x64`, `packages/linux-arm64` and `packages/darwin-arm64`
+2. Push a tag `pace-v<version>` (or run the **Pace Release** workflow manually)
+3. The workflow builds the three binaries, then publishes the platform packages and finally the main package with `npm publish --provenance` (needs the `NPM_TOKEN` secret)

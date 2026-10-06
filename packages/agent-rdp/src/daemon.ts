@@ -18,16 +18,16 @@ const require = createRequire(import.meta.url);
 /**
  * Get the platform package name for the current OS/arch.
  */
-function getPlatformPackage(): string {
-  const platform = process.platform; // 'darwin', 'linux', 'win32'
+export function getPlatformPackage(): string {
+  const platform = process.platform; // 'darwin', 'linux'
   const arch = process.arch; // 'arm64', 'x64'
-  return `@agent-rdp/${platform}-${arch}`;
+  return `@foundationallabs/agent-rdp-${platform}-${arch}`;
 }
 
 /**
  * Find the agent-rdp binary.
  */
-function findBinary(): string {
+export function findBinary(): string {
   const platformPackage = getPlatformPackage();
   const ext = process.platform === 'win32' ? '.exe' : '';
 

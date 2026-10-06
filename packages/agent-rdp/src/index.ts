@@ -5,7 +5,7 @@
  *
  * @example
  * ```typescript
- * import { RdpSession } from 'agent-rdp';
+ * import { RdpSession } from '@foundationallabs/agent-rdp';
  *
  * const rdp = new RdpSession({ session: 'default' });
  *

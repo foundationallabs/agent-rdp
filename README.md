@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/91892b39-4edb-412b-b265-55ccd75d7421
 ### From npm
 
 ```bash
-npm install -g agent-rdp
+npm install -g @foundationallabs/agent-rdp
 ```
 
 ### As a Claude Code skill
@@ -334,7 +334,7 @@ agent-rdp --json screenshot --base64
 Use agent-rdp programmatically from Node.js/TypeScript:
 
 ```typescript
-import { RdpSession } from 'agent-rdp';
+import { RdpSession } from '@foundationallabs/agent-rdp';
 
 const rdp = new RdpSession({ session: 'default' });
 
