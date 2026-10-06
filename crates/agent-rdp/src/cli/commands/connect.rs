@@ -183,9 +183,20 @@ mod tests {
         assert_eq!(request.alternate_shell.as_deref(), Some(PSM_SHELL));
     }
 
+    // Env-dependent cases live in one test: parallel tests must not race on the process env.
     #[test]
-    fn alternate_shell_absent_flag_is_none() {
+    fn alternate_shell_absent_flag_is_none_and_env_is_the_fallback() {
+        const VAR: &str = "AGENT_RDP_ALTERNATE_SHELL";
+        std::env::remove_var(VAR);
         assert_eq!(request_for(&[]).alternate_shell, None);
+
+        std::env::set_var(VAR, PSM_SHELL);
+        let from_env = request_for(&[]).alternate_shell;
+        let from_flag = request_for(&["--alternate-shell", "other shell"]).alternate_shell;
+        std::env::remove_var(VAR);
+
+        assert_eq!(from_env.as_deref(), Some(PSM_SHELL));
+        assert_eq!(from_flag.as_deref(), Some("other shell"));
     }
 
     #[test]

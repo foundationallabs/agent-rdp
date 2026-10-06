@@ -184,6 +184,8 @@ agent-rdp connect --host psm.example.com -u user -p secret \
   --alternate-shell 'psm /u user@domain /a target /c PSM-RDP'
 ```
 
+The value can also come from the `AGENT_RDP_ALTERNATE_SHELL` environment variable.
+
 ### UI Automation
 
 Interact with Windows applications programmatically via the Windows UI Automation API using native patterns (InvokePattern, SelectionItemPattern, TogglePattern, etc.). When enabled, a PowerShell agent is injected into the remote session that captures the accessibility tree and performs actions. Communication between the CLI and the agent uses a Dynamic Virtual Channel (DVC) for fast bidirectional IPC.
@@ -323,6 +325,7 @@ agent-rdp --json screenshot --base64
 | `AGENT_RDP_PORT` | RDP server port (default: 3389) |
 | `AGENT_RDP_USERNAME` | RDP username |
 | `AGENT_RDP_PASSWORD` | RDP password |
+| `AGENT_RDP_ALTERNATE_SHELL` | Alternate shell to start instead of the desktop |
 | `AGENT_RDP_SESSION` | Session name (default: "default") |
 | `AGENT_RDP_STREAM_PORT` | WebSocket streaming port (0 = disabled) |
 
