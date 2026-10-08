@@ -361,12 +361,10 @@ ws.send(JSON.stringify({
 
 ## Security Considerations
 
-- The WebSocket server binds to `0.0.0.0` by default (all interfaces)
-- There is no authentication on the WebSocket connection
-- For production use, consider:
-  - Running behind a reverse proxy with authentication
-  - Using SSH tunneling
-  - Binding to localhost only and using a local viewer
+- The WebSocket server binds to `127.0.0.1` only, so it is reachable from the same host
+- There is no authentication on the WebSocket connection: any local process can view the
+  desktop and send input
+- To view from another machine, use SSH tunneling or a reverse proxy with authentication
 
 ## Compatibility
 

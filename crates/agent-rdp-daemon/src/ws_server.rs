@@ -6,6 +6,7 @@
 //! Also serves the embedded viewer HTML on regular HTTP requests.
 
 use std::collections::HashSet;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -131,9 +132,8 @@ impl WsServer {
         &self,
         rdp_session: Arc<tokio::sync::Mutex<Option<RdpSession>>>,
     ) -> anyhow::Result<WsServerHandle> {
-        let addr = format!("0.0.0.0:{}", self.port);
-        let listener = TcpListener::bind(&addr).await?;
-        info!("WebSocket server listening on ws://{}", addr);
+        let listener = bind_loopback(self.port).await?;
+        info!("WebSocket server listening on ws://{}", listener.local_addr()?);
 
         // Create broadcast channel
         let (broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(16);
@@ -587,9 +587,21 @@ pub fn get_stream_quality() -> u8 {
         .unwrap_or(80)
 }
 
+/// Bind the stream port on loopback only: the stream is unauthenticated and carries full
+/// input control, and its one consumer (the session manager's proxy) runs on the same host.
+async fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stream_listener_is_loopback_only() {
+        let listener = bind_loopback(0).await.unwrap();
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+    }
 
     #[test]
     fn stream_fps_request_beats_env_and_default() {
