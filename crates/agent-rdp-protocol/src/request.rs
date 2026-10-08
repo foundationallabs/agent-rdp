@@ -60,7 +60,8 @@ pub struct DriveMapping {
 }
 
 /// RDP connection parameters.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+// `Debug` is implemented by hand to redact the password.
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/agent-rdp/src/generated/")]
 pub struct ConnectRequest {
     /// Server hostname or IP address.
@@ -134,6 +135,48 @@ pub struct ConnectRequest {
 
 fn default_stream_quality() -> u8 {
     80
+}
+
+impl std::fmt::Debug for ConnectRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure so a new field fails to compile here instead of going unprinted.
+        let Self {
+            host,
+            port,
+            username,
+            password: _,
+            domain,
+            alternate_shell,
+            enable_credssp,
+            server_cert_pin,
+            width,
+            height,
+            drives,
+            enable_win_automation,
+            stream_port,
+            stream_fps,
+            stream_quality,
+            serve_viewer,
+        } = self;
+        f.debug_struct("ConnectRequest")
+            .field("host", host)
+            .field("port", port)
+            .field("username", username)
+            .field("password", &"<redacted>")
+            .field("domain", domain)
+            .field("alternate_shell", alternate_shell)
+            .field("enable_credssp", enable_credssp)
+            .field("server_cert_pin", server_cert_pin)
+            .field("width", width)
+            .field("height", height)
+            .field("drives", drives)
+            .field("enable_win_automation", enable_win_automation)
+            .field("stream_port", stream_port)
+            .field("stream_fps", stream_fps)
+            .field("stream_quality", stream_quality)
+            .field("serve_viewer", serve_viewer)
+            .finish()
+    }
 }
 
 impl Default for ConnectRequest {
@@ -391,6 +434,26 @@ mod tests {
             "width":1280,"height":800}"#;
         match serde_json::from_str::<Request>(json).unwrap() {
             Request::Connect(c) => assert_eq!(c.enable_credssp, None),
+            _ => panic!("unexpected request type"),
+        }
+    }
+
+    #[test]
+    fn test_connect_debug_redacts_the_password() {
+        let req = Request::Connect(ConnectRequest {
+            username: "admin".to_string(),
+            password: "hunter2-secret".to_string(),
+            ..Default::default()
+        });
+
+        let debug = format!("{req:?}");
+        assert!(!debug.contains("hunter2-secret"), "{debug}");
+        assert!(debug.contains("password: \"<redacted>\""), "{debug}");
+        assert!(debug.contains("username: \"admin\""), "{debug}");
+
+        let json = serde_json::to_string(&req).unwrap();
+        match serde_json::from_str::<Request>(&json).unwrap() {
+            Request::Connect(c) => assert_eq!(c.password, "hunter2-secret"),
             _ => panic!("unexpected request type"),
         }
     }
