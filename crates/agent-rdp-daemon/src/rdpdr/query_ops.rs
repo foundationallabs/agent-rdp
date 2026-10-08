@@ -353,7 +353,7 @@ pub fn query_directory(
                 "query_directory: file_id={} -> parent_path={:?}",
                 file_id, _parent_path
             );
-            let mut find_file_path = None;
+            let mut found = None;
 
             // Get base path for this device
             let base_path = match backend.get_base_path(device_id) {
@@ -385,17 +385,8 @@ pub fn query_directory(
                         }
                     };
 
-                    if let Ok(read_dir) = fs::read_dir(&dir_path) {
-                        let mut iter = read_dir;
-                        // Find first non-. and non-.. entry
-                        while let Some(Ok(entry)) = iter.next() {
-                            let name = entry.file_name();
-                            let name_str = name.to_string_lossy();
-                            if name_str != "." && name_str != ".." {
-                                find_file_path = Some(entry.path());
-                                break;
-                            }
-                        }
+                    if let Ok(mut iter) = fs::read_dir(&dir_path) {
+                        found = next_listed_entry(&mut iter);
                         backend.file_dir_map.insert(
                             req_inner.device_io_request.file_id,
                             DirIterState {
@@ -412,11 +403,19 @@ pub fn query_directory(
                             return Ok(query_directory_refusal(req_inner.device_io_request, status))
                         }
                     };
-                    find_file_path = Some(full_path);
+                    // The resolver refused any symlink below the drive, so following links here
+                    // can only reach the operator-configured drive folder itself.
+                    found = match fs::metadata(&full_path) {
+                        Ok(meta) => Some((full_path, meta)),
+                        Err(error) => {
+                            debug!(%error, "Get metadata error (file may have been deleted)");
+                            None
+                        }
+                    };
                 }
 
                 make_query_dir_resp(
-                    find_file_path,
+                    found,
                     req_inner.device_io_request,
                     req_inner.file_info_class_lvl,
                     true,
@@ -427,13 +426,11 @@ pub fn query_directory(
                     .file_dir_map
                     .get_mut(&req_inner.device_io_request.file_id)
                 {
-                    if let Some(Ok(entry)) = dir_state.iter.next() {
-                        find_file_path = Some(entry.path());
-                    }
+                    found = next_listed_entry(&mut dir_state.iter);
                 }
 
                 make_query_dir_resp(
-                    find_file_path,
+                    found,
                     req_inner.device_io_request,
                     req_inner.file_info_class_lvl,
                     false,
@@ -471,70 +468,57 @@ fn query_directory_refusal(
     )]
 }
 
+/// Next entry worth listing, with metadata from the entry itself.
+///
+/// `DirEntry::metadata` does not follow symlinks, so the check and the reported metadata come from
+/// one stat. Symlinks are skipped: the resolver refuses to open them, and following one would
+/// report its target's size and times. Entries that vanish between listing and stat are skipped.
+fn next_listed_entry(iter: &mut ReadDir) -> Option<(PathBuf, fs::Metadata)> {
+    iter.filter_map(Result::ok).find_map(|entry| {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            return None;
+        }
+        match entry.metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => None,
+            Ok(meta) => Some((entry.path(), meta)),
+            Err(error) => {
+                debug!(%error, "Get metadata error (file may have been deleted)");
+                None
+            }
+        }
+    })
+}
+
 fn make_query_dir_resp(
-    find_file_path: Option<PathBuf>,
+    found: Option<(PathBuf, fs::Metadata)>,
     device_io_request: DeviceIoRequest,
     file_class: FileInformationClassLevel,
     initial_query: bool,
 ) -> PduResult<Vec<SvcMessage>> {
-    let not_found_status = if initial_query {
-        NtStatus::NO_SUCH_FILE
-    } else {
-        NtStatus::NO_MORE_FILES
-    };
-
-    match find_file_path {
-        None => Ok(vec![SvcMessage::from(
-            RdpdrPdu::ClientDriveQueryDirectoryResponse(ClientDriveQueryDirectoryResponse {
-                device_io_reply: DeviceIoResponse::new(device_io_request, not_found_status),
-                buffer: None,
-            }),
-        )]),
-        Some(file_full_path) => {
-            let file_name = file_full_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-
-            match fs::metadata(&file_full_path) {
-                Ok(meta) => {
-                    let (status, buffer) = match directory_entry(&file_class, &meta, file_name) {
-                        Some(entry) => (NtStatus::SUCCESS, Some(entry)),
-                        None => {
-                            debug!(
-                                "unsupported file class for query directory: {:?}",
-                                file_class
-                            );
-                            (NtStatus::NOT_SUPPORTED, None)
-                        }
-                    };
-                    Ok(vec![SvcMessage::from(
-                        RdpdrPdu::ClientDriveQueryDirectoryResponse(
-                            ClientDriveQueryDirectoryResponse {
-                                device_io_reply: DeviceIoResponse::new(device_io_request, status),
-                                buffer,
-                            },
-                        ),
-                    )])
-                }
-                Err(error) => {
-                    // File may have been deleted between listing and metadata fetch (normal for IPC)
-                    debug!(%error, "Get metadata error (file may have been deleted)");
-                    Ok(vec![SvcMessage::from(
-                        RdpdrPdu::ClientDriveQueryDirectoryResponse(
-                            ClientDriveQueryDirectoryResponse {
-                                device_io_reply: DeviceIoResponse::new(
-                                    device_io_request,
-                                    not_found_status,
-                                ),
-                                buffer: None,
-                            },
-                        ),
-                    )])
+    let (status, buffer) = match found {
+        None if initial_query => (NtStatus::NO_SUCH_FILE, None),
+        None => (NtStatus::NO_MORE_FILES, None),
+        Some((path, meta)) => {
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            match directory_entry(&file_class, &meta, file_name) {
+                Some(entry) => (NtStatus::SUCCESS, Some(entry)),
+                None => {
+                    debug!(
+                        "unsupported file class for query directory: {:?}",
+                        file_class
+                    );
+                    (NtStatus::NOT_SUPPORTED, None)
                 }
             }
         }
-    }
+    };
+    Ok(vec![SvcMessage::from(
+        RdpdrPdu::ClientDriveQueryDirectoryResponse(ClientDriveQueryDirectoryResponse {
+            device_io_reply: DeviceIoResponse::new(device_io_request, status),
+            buffer,
+        }),
+    )])
 }
 
 /// Build one directory entry in the requested class, or `None` for a class the server may not
@@ -550,7 +534,13 @@ pub(super) fn directory_entry(
     let creation_time = get_creation_time(meta);
     let last_access_time = get_last_access_time(meta);
     let last_write_time = get_last_write_time(meta);
-    let size = i64::try_from(meta.len()).unwrap_or(0);
+    // NTFS reports 0 for a directory's EndOfFile and AllocationSize; a Unix directory's st_size
+    // is its own block size, which `dir` would add to the folder's byte total.
+    let size = if meta.is_dir() {
+        0
+    } else {
+        i64::try_from(meta.len()).unwrap_or(0)
+    };
     let attributes = get_file_attributes(meta, file_name);
     let name = file_name.to_owned();
 

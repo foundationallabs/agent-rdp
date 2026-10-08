@@ -345,6 +345,47 @@ fn filetime(secs_since_unix_epoch: u64) -> i64 {
     i64::try_from(secs_since_unix_epoch).unwrap() * 10_000_000 + 116_444_736_000_000_000
 }
 
+/// The CreationTime a drive entry should carry: Unix has no birth time, so the backend reports
+/// the inode change time; Windows reports the real creation time.
+fn creation_filetime(meta: &fs::Metadata) -> i64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        filetime(u64::try_from(meta.ctime()).unwrap())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        i64::try_from(meta.creation_time()).unwrap()
+    }
+}
+
+/// Enumerate `dir` (a drive path ending in `\*`) in `class` and return every entry, in order.
+fn enumerate(
+    fx: &mut Fixture,
+    class: &FileInformationClassLevel,
+    dir: &str,
+) -> Vec<(String, Vec<u8>)> {
+    let mut entries = Vec::new();
+    let (status, entry) = directory_entry_bytes(&fx.directory_request(class, true, dir));
+    if status == NtStatus::NO_SUCH_FILE {
+        assert!(entry.is_empty());
+        return entries;
+    }
+    assert_eq!(status, NtStatus::SUCCESS, "{class:?}");
+    entries.push((entry_name(class, &entry), entry));
+    loop {
+        let (status, entry) = directory_entry_bytes(&fx.directory_request(class, false, ""));
+        if status == NtStatus::NO_MORE_FILES {
+            assert!(entry.is_empty());
+            return entries;
+        }
+        assert_eq!(status, NtStatus::SUCCESS, "{class:?}");
+        entries.push((entry_name(class, &entry), entry));
+        assert!(entries.len() <= 100, "{class:?}: enumeration did not end");
+    }
+}
+
 #[test]
 fn each_directory_class_encodes_the_ms_fscc_layout() {
     const ACCESSED: u64 = 1_700_000_000;
@@ -363,6 +404,8 @@ fn each_directory_class_encodes_the_ms_fscc_layout() {
                 .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(MODIFIED)),
         )
         .unwrap();
+
+    let created = creation_filetime(&fs::metadata(&path).unwrap());
 
     for class in &DIRECTORY_CLASSES {
         let (status, entry) =
@@ -385,6 +428,7 @@ fn each_directory_class_encodes_the_ms_fscc_layout() {
         if *class == FileInformationClassLevel::FILE_NAMES_INFORMATION {
             continue;
         }
+        assert_eq!(i64_at(&entry, 8), created, "{class:?}: CreationTime");
         assert_eq!(
             i64_at(&entry, 16),
             filetime(ACCESSED),
@@ -410,22 +454,39 @@ fn each_directory_class_encodes_the_ms_fscc_layout() {
         if *class != FileInformationClassLevel::FILE_DIRECTORY_INFORMATION {
             assert_eq!(u32_at(&entry, 64), 0, "{class:?}: EaSize");
         }
+        if *class == FileInformationClassLevel::FILE_BOTH_DIRECTORY_INFORMATION {
+            // ShortNameLength (68) and the 24-byte ShortName (69..93): no 8.3 name.
+            assert_eq!(entry[68..93], [0; 25], "{class:?}: short name");
+        }
     }
 }
 
 #[test]
-fn a_directory_entry_is_flagged_as_a_directory() {
+fn a_directory_entry_is_flagged_as_a_directory_of_size_zero() {
     let mut fx = Fixture::new();
+    // A Unix directory has a nonzero st_size; NTFS reports 0, and `dir` sums the field.
+    #[cfg(unix)]
+    assert!(fs::metadata(fx.drive.join("sub")).unwrap().len() > 0);
     for class in &DIRECTORY_CLASSES {
-        let (status, entry) = directory_entry_bytes(&fx.directory_request(class, true, "\\sub"));
-        assert_eq!(status, NtStatus::SUCCESS, "{class:?}");
-        assert_eq!(entry_name(class, &entry), "sub");
-        if *class != FileInformationClassLevel::FILE_NAMES_INFORMATION {
+        let queried = directory_entry_bytes(&fx.directory_request(class, true, "\\sub"));
+        let listed = enumerate(&mut fx, class, "\\*");
+        let [(name, listed)] = listed.as_slice() else {
+            panic!("{class:?}: the drive root holds only `sub`");
+        };
+        assert_eq!(name, "sub");
+        for (status, entry) in [(queried.0, &queried.1), (NtStatus::SUCCESS, listed)] {
+            assert_eq!(status, NtStatus::SUCCESS, "{class:?}");
+            assert_eq!(entry_name(class, entry), "sub");
+            if *class == FileInformationClassLevel::FILE_NAMES_INFORMATION {
+                continue;
+            }
             assert_eq!(
-                u32_at(&entry, 56),
+                u32_at(entry, 56),
                 FileAttributes::FILE_ATTRIBUTE_DIRECTORY.bits(),
                 "{class:?}"
             );
+            assert_eq!(i64_at(entry, 40), 0, "{class:?}: EndOfFile");
+            assert_eq!(i64_at(entry, 48), 0, "{class:?}: AllocationSize");
         }
     }
 }
@@ -539,6 +600,42 @@ fn every_directory_class_denies_a_symlink_inside_the_drive() {
         assert_eq!(
             fx.query_directory_as(class, "\\out\\*"),
             NtStatus::ACCESS_DENIED,
+            "{class:?}"
+        );
+    }
+    assert!(!fx.opened_outside_the_drive());
+}
+
+#[cfg(unix)]
+#[test]
+fn enumeration_skips_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    const OUTSIDE_SIZE: usize = 123_457;
+    let mut fx = Fixture::new();
+    fs::write(fx.outside.join("big.bin"), vec![b'x'; OUTSIDE_SIZE]).unwrap();
+    let listed = fx.drive.join("listed");
+    fs::create_dir_all(listed.join("dir")).unwrap();
+    fs::write(listed.join("plain.txt"), b"plain").unwrap();
+    symlink(fx.outside.join("big.bin"), listed.join("link-file")).unwrap();
+    symlink(&fx.outside, listed.join("link-dir")).unwrap();
+    symlink(fx.drive.join("sub"), listed.join("link-inside")).unwrap();
+    let only_links = fx.drive.join("only-links");
+    fs::create_dir(&only_links).unwrap();
+    symlink(fx.outside.join("big.bin"), only_links.join("link-file")).unwrap();
+
+    for class in &DIRECTORY_CLASSES {
+        let entries = enumerate(&mut fx, class, "\\listed\\*");
+        let mut names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["dir", "plain.txt"], "{class:?}");
+        if *class != FileInformationClassLevel::FILE_NAMES_INFORMATION {
+            for (name, entry) in &entries {
+                assert_ne!(i64_at(entry, 40), OUTSIDE_SIZE as i64, "{class:?} {name}");
+            }
+        }
+        assert!(
+            enumerate(&mut fx, class, "\\only-links\\*").is_empty(),
             "{class:?}"
         );
     }
