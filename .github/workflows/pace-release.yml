@@ -125,6 +125,7 @@ jobs:
     # Publish only from a tag, including manual runs; a branch dispatch builds but does not publish.
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    environment: npm-publish
     permissions:
       contents: read
       id-token: write # npm trusted publishing (OIDC) and provenance
