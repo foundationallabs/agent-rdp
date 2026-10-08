@@ -336,6 +336,10 @@ pub enum ErrorCode {
     #[error("authentication failed")]
     AuthenticationFailed,
 
+    /// The server's certificate key does not match `server_cert_pin`.
+    #[error("certificate mismatch")]
+    CertificateMismatch,
+
     /// Connection timed out.
     #[error("timeout")]
     Timeout,

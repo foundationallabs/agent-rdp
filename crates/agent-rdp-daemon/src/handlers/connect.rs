@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use crate::automation::{AutomationBootstrap, SharedAutomationState, SharedDvcState};
 use crate::daemon::{ClipboardChangedRx, SharedWsHandle};
 use crate::rdp_session::{DisconnectNotify, RdpConfig, RdpError, RdpSession};
+use crate::tls::CertPin;
 use crate::ws_server::{get_stream_fps, WsServer, WsServerConfig};
 
 /// The response for a failed connect. Only a refused login is `authentication_failed`; the
@@ -18,18 +19,32 @@ fn connect_error_response(error: &RdpError) -> Response {
         RdpError::AuthenticationFailed(reason) => {
             Response::authentication_failed(Some(*reason), error.to_string())
         }
+        RdpError::CertificateMismatch(_) => {
+            Response::error(ErrorCode::CertificateMismatch, error.to_string())
+        }
         _ => Response::error(ErrorCode::ConnectionFailed, error.to_string()),
     }
+}
+
+/// Parse the request's server certificate pin, if it has one.
+fn parse_cert_pin(params: &ConnectRequest) -> Result<Option<CertPin>, Response> {
+    params
+        .server_cert_pin
+        .as_deref()
+        .map(CertPin::parse)
+        .transpose()
+        .map_err(|e| Response::error(ErrorCode::InvalidRequest, e.to_string()))
 }
 
 /// Map a connect request onto the RDP session configuration.
 ///
 /// `drives` is passed separately because the handler appends the automation drive to the
-/// request's own drive list before connecting.
+/// request's own drive list before connecting. The pin is parsed before anything else.
 fn build_rdp_config(
     params: ConnectRequest,
     drives: Vec<DriveMapping>,
     automation_dvc_state: Option<SharedDvcState>,
+    server_cert_pin: Option<CertPin>,
 ) -> RdpConfig {
     RdpConfig {
         host: params.host,
@@ -43,6 +58,7 @@ fn build_rdp_config(
         height: params.height,
         drives,
         automation_dvc_state,
+        server_cert_pin,
     }
 }
 
@@ -61,6 +77,12 @@ pub async fn handle(
     let stream_fps = params.stream_fps;
     let stream_quality = params.stream_quality;
     let serve_viewer = params.serve_viewer;
+
+    // Reject a malformed pin before touching the existing session
+    let server_cert_pin = match parse_cert_pin(&params) {
+        Ok(pin) => pin,
+        Err(response) => return response,
+    };
 
     // Auto-disconnect if already connected (handles stale/dropped connections)
     {
@@ -124,7 +146,7 @@ pub async fn handle(
     };
 
     // Build configuration
-    let config = build_rdp_config(params, drives, automation_dvc_state);
+    let config = build_rdp_config(params, drives, automation_dvc_state, server_cert_pin);
 
     // Attempt connection
     let rdp = match RdpSession::connect(config, Some(disconnect_notify)).await {
@@ -285,6 +307,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pin_mismatch_is_certificate_mismatch() {
+        let error = connect_error_response(&RdpError::CertificateMismatch("key".to_string()))
+            .error
+            .unwrap();
+        assert_eq!(error.code, ErrorCode::CertificateMismatch);
+        assert_eq!(error.reason, None);
+    }
+
+    #[test]
+    fn server_cert_pin_is_parsed_or_refused() {
+        let pin = "sha256/v0ED3aaQaqkZx0eWMgIKcV21wFokPfvCkSa1dZpbHNA=";
+        let params = ConnectRequest {
+            server_cert_pin: Some(pin.to_string()),
+            ..Default::default()
+        };
+        let parsed = parse_cert_pin(&params).unwrap().unwrap();
+        assert_eq!(parsed.to_string(), pin);
+        let config = build_rdp_config(params, Vec::new(), None, Some(parsed.clone()));
+        assert_eq!(config.server_cert_pin, Some(parsed));
+
+        assert_eq!(parse_cert_pin(&ConnectRequest::default()).unwrap(), None);
+
+        let malformed = ConnectRequest {
+            server_cert_pin: Some("sha256/short".to_string()),
+            ..Default::default()
+        };
+        let error = parse_cert_pin(&malformed).unwrap_err().error.unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
     fn drive(name: &str) -> DriveMapping {
         DriveMapping {
             path: format!("/tmp/{name}"),
@@ -307,7 +360,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = build_rdp_config(params, vec![drive("docs"), drive("auto")], None);
+        let config = build_rdp_config(params, vec![drive("docs"), drive("auto")], None, None);
 
         assert_eq!(config.host, "10.0.0.5");
         assert_eq!(config.port, 4489);
@@ -323,7 +376,7 @@ mod tests {
 
     #[test]
     fn rdp_config_enable_credssp_defaults_to_true() {
-        let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None);
+        let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None, None);
         assert!(config.enable_credssp);
     }
 
@@ -333,13 +386,13 @@ mod tests {
             enable_credssp: Some(false),
             ..Default::default()
         };
-        let config = build_rdp_config(params, Vec::new(), None);
+        let config = build_rdp_config(params, Vec::new(), None, None);
         assert!(!config.enable_credssp);
     }
 
     #[test]
     fn rdp_config_alternate_shell_none_when_unset() {
-        let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None);
+        let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None, None);
         assert_eq!(config.alternate_shell, None);
     }
 }

@@ -83,6 +83,11 @@ export interface ConnectOptions {
    * TLS security (RDP `enablecredsspsupport:i:0`), as some CyberArk PSM deployments do.
    */
   enableNla?: boolean;
+  /**
+   * Required server key: `sha256/<base64>` of the certificate's DER SubjectPublicKeyInfo. When
+   * set, connect fails with `certificate_mismatch` unless the server holds that key.
+   */
+  serverCertPin?: string;
   width?: number;
   height?: number;
   drives?: DriveMapping[];

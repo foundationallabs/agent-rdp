@@ -92,6 +92,13 @@ pub struct ConnectRequest {
     #[ts(optional)]
     pub enable_credssp: Option<bool>,
 
+    /// Required server key: `sha256/<base64>` of the certificate's DER SubjectPublicKeyInfo.
+    /// When set, the TLS handshake fails with `certificate_mismatch` unless the server holds
+    /// that key. When unset, any server certificate is accepted.
+    #[serde(default)]
+    #[ts(optional)]
+    pub server_cert_pin: Option<String>,
+
     /// Desktop width in pixels.
     pub width: u16,
 
@@ -139,6 +146,7 @@ impl Default for ConnectRequest {
             domain: None,
             alternate_shell: None,
             enable_credssp: None,
+            server_cert_pin: None,
             width: 1280,
             height: 800,
             drives: Vec::new(),
@@ -383,6 +391,33 @@ mod tests {
             "width":1280,"height":800}"#;
         match serde_json::from_str::<Request>(json).unwrap() {
             Request::Connect(c) => assert_eq!(c.enable_credssp, None),
+            _ => panic!("unexpected request type"),
+        }
+    }
+
+    #[test]
+    fn test_connect_server_cert_pin_round_trip() {
+        let pin = "sha256/v0ED3aaQaqkZx0eWMgIKcV21wFokPfvCkSa1dZpbHNA=";
+        let req = Request::Connect(ConnectRequest {
+            server_cert_pin: Some(pin.to_string()),
+            ..Default::default()
+        });
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"server_cert_pin\""));
+        match serde_json::from_str::<Request>(&json).unwrap() {
+            Request::Connect(c) => assert_eq!(c.server_cert_pin.as_deref(), Some(pin)),
+            _ => panic!("unexpected request type"),
+        }
+    }
+
+    #[test]
+    fn test_connect_without_server_cert_pin_deserializes_to_none() {
+        // Payload from a client that predates `server_cert_pin`.
+        let json = r#"{"type":"connect","host":"h","port":3389,"username":"u","password":"p",
+            "width":1280,"height":800}"#;
+        match serde_json::from_str::<Request>(json).unwrap() {
+            Request::Connect(c) => assert_eq!(c.server_cert_pin, None),
             _ => panic!("unexpected request type"),
         }
     }

@@ -36,6 +36,12 @@ alternate_shell?: string,
  */
 enable_credssp?: boolean, 
 /**
+ * Required server key: `sha256/<base64>` of the certificate's DER SubjectPublicKeyInfo.
+ * When set, the TLS handshake fails with `certificate_mismatch` unless the server holds
+ * that key. When unset, any server certificate is accepted.
+ */
+server_cert_pin?: string, 
+/**
  * Desktop width in pixels.
  */
 width: number, 

@@ -47,6 +47,7 @@ x509-cert = "0.2"
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
+ring = "0.17"
 webpki-roots = "0.26"
 
 # Image processing

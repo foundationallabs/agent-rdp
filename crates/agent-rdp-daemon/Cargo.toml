@@ -35,6 +35,7 @@ x509-cert = { workspace = true }
 # TLS
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
+ring = { workspace = true }
 webpki-roots = { workspace = true }
 
 # Image processing

@@ -117,6 +117,10 @@ pub struct ConnectArgs {
     #[arg(long)]
     pub no_nla: bool,
 
+    /// Require this server key: sha256/<base64> of the certificate's DER SubjectPublicKeyInfo
+    #[arg(long, value_name = "PIN")]
+    pub server_cert_pin: Option<String>,
+
     /// Desktop width
     #[arg(long, default_value = "1280")]
     pub width: u16,

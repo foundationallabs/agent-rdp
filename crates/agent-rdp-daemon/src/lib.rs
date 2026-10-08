@@ -11,6 +11,7 @@ pub mod logon;
 pub mod ocr;
 pub mod rdp_session;
 pub mod rdpdr;
+pub mod tls;
 pub mod ws_input;
 pub mod ws_server;
 

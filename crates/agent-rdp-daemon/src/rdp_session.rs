@@ -27,6 +27,7 @@ use ironrdp_rdpdr::Rdpdr;
 use crate::automation::{AutomationDvc, SharedDvcState};
 use crate::logon::{self, LogonOutcome, LogonReport, LogonWatch};
 use crate::rdpdr::MultiDriveBackend;
+use crate::tls::{self, CertPin};
 use ironrdp_rdpsnd::client::{NoopRdpsndBackend, Rdpsnd};
 use ironrdp_tokio::{FramedWrite, TokioFramed};
 use tokio::net::TcpStream;
@@ -43,6 +44,9 @@ pub enum RdpError {
 
     #[error("TLS error: {0}")]
     TlsError(String),
+
+    #[error("{0}")]
+    CertificateMismatch(String),
 
     #[error("Protocol error: {0}")]
     ProtocolError(String),
@@ -69,6 +73,14 @@ impl From<ConnectorError> for RdpError {
     }
 }
 
+/// A pin mismatch is its own error, so the caller does not retry it as a connection failure.
+fn tls_upgrade_error(error: std::io::Error) -> RdpError {
+    match tls::certificate_mismatch(&error) {
+        Some(mismatch) => RdpError::CertificateMismatch(mismatch.to_string()),
+        None => RdpError::TlsError(error.to_string()),
+    }
+}
+
 /// How long an NLA-off `connect()` waits for the server to report the login result. Short of
 /// the SDK's 30 s default request timeout, so the connect response still reaches the caller.
 const LOGON_OUTCOME_WINDOW: Duration = Duration::from_secs(20);
@@ -90,6 +102,8 @@ pub struct RdpConfig {
     pub drives: Vec<DriveMapping>,
     /// Shared DVC state for automation (enables DVC channel if provided).
     pub automation_dvc_state: Option<SharedDvcState>,
+    /// Required server key. Without one, any certificate is accepted.
+    pub server_cert_pin: Option<CertPin>,
 }
 
 use crate::automation::DvcCommandReceiver;
@@ -275,9 +289,10 @@ impl RdpSession {
 
         // Perform TLS upgrade
         let initial_stream: TcpStream = framed.into_inner_no_leftover();
-        let (tls_stream, server_cert) = Self::tls_upgrade(initial_stream, &config.host)
-            .await
-            .map_err(|e| RdpError::TlsError(e.to_string()))?;
+        let (tls_stream, server_cert) =
+            tls::upgrade(initial_stream, &config.host, config.server_cert_pin.as_ref())
+                .await
+                .map_err(tls_upgrade_error)?;
         debug!("TLS connection established");
 
         // Mark upgrade as done
@@ -382,57 +397,6 @@ impl RdpSession {
             command_tx,
             _task_handle: task_handle,
         })
-    }
-
-    /// Perform TLS upgrade on the stream.
-    async fn tls_upgrade(
-        stream: TcpStream,
-        server_name: &str,
-    ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Vec<u8>), std::io::Error> {
-        use tokio_rustls::TlsConnector;
-
-        let tls_config = Self::create_tls_config();
-        let connector = TlsConnector::from(Arc::new(tls_config));
-
-        // Try to parse as IP address first, then as DNS name
-        let server_name = if let Ok(ip) = server_name.parse::<std::net::IpAddr>() {
-            rustls::pki_types::ServerName::IpAddress(ip.into())
-        } else {
-            rustls::pki_types::ServerName::try_from(server_name.to_string())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
-        };
-
-        let tls_stream = connector.connect(server_name, stream).await?;
-
-        // Get peer certificate
-        let (_, server_conn) = tls_stream.get_ref();
-        let certs = server_conn
-            .peer_certificates()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "No peer certificate"))?;
-
-        let cert_der = certs
-            .first()
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "Empty certificate chain")
-            })?
-            .to_vec();
-
-        Ok((tls_stream, cert_der))
-    }
-
-    /// Create TLS configuration that accepts self-signed certificates.
-    fn create_tls_config() -> rustls::ClientConfig {
-        // Install ring as the default crypto provider
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-        // RDP servers often use self-signed certificates
-        rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerifier))
-            .with_no_client_auth()
     }
 
     /// Extract public key from DER-encoded certificate.
@@ -864,57 +828,6 @@ async fn run_frame_processor(
     }
 }
 
-/// Custom certificate verifier that accepts all certificates.
-/// This is necessary because RDP servers typically use self-signed certificates.
-#[derive(Debug)]
-struct NoVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
-            rustls::SignatureScheme::ED25519,
-        ]
-    }
-}
-
 /// No-op network client for CredSSP.
 /// This works for basic NTLM authentication but doesn't support Kerberos.
 struct NoopNetworkClient;
@@ -1057,6 +970,18 @@ mod tests {
         assert!(matches!(RdpError::from(other), RdpError::ConnectionFailed(_)));
     }
 
+    #[test]
+    fn pin_mismatch_is_not_a_tls_error() {
+        let mismatch = rustls::Error::InvalidCertificate(rustls::CertificateError::Other(
+            rustls::OtherError(Arc::new(tls::CertificateMismatch { presented: None })),
+        ));
+        let error = std::io::Error::new(std::io::ErrorKind::InvalidData, mismatch);
+        assert!(matches!(tls_upgrade_error(error), RdpError::CertificateMismatch(_)));
+
+        let reset = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        assert!(matches!(tls_upgrade_error(reset), RdpError::TlsError(_)));
+    }
+
     fn test_config(alternate_shell: Option<&str>) -> RdpConfig {
         RdpConfig {
             host: "host".to_string(),
@@ -1070,6 +995,7 @@ mod tests {
             height: 800,
             drives: Vec::new(),
             automation_dvc_state: None,
+            server_cert_pin: None,
         }
     }
 
