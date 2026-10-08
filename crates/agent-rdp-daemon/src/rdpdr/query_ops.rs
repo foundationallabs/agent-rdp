@@ -498,47 +498,24 @@ fn make_query_dir_resp(
 
             match fs::metadata(&file_full_path) {
                 Ok(meta) => {
-                    let file_attribute = get_file_attributes(&meta, file_name);
-                    if file_class == FileInformationClassLevel::FILE_BOTH_DIRECTORY_INFORMATION {
-                        let info = FileBothDirectoryInformation::new(
-                            get_creation_time(&meta),
-                            get_last_write_time(&meta),
-                            get_last_access_time(&meta),
-                            get_last_write_time(&meta),
-                            i64::try_from(meta.len()).unwrap_or(0),
-                            file_attribute,
-                            file_name.to_owned(),
-                        );
-                        let info2 = FileInformationClass::BothDirectory(info);
-                        Ok(vec![SvcMessage::from(
-                            RdpdrPdu::ClientDriveQueryDirectoryResponse(
-                                ClientDriveQueryDirectoryResponse {
-                                    device_io_reply: DeviceIoResponse::new(
-                                        device_io_request,
-                                        NtStatus::SUCCESS,
-                                    ),
-                                    buffer: Some(info2),
-                                },
-                            ),
-                        )])
-                    } else {
-                        // Windows may request various file info classes; NOT_SUPPORTED is a valid response
-                        debug!(
-                            "unsupported file class for query directory: {:?}",
-                            file_class
-                        );
-                        Ok(vec![SvcMessage::from(
-                            RdpdrPdu::ClientDriveQueryDirectoryResponse(
-                                ClientDriveQueryDirectoryResponse {
-                                    device_io_reply: DeviceIoResponse::new(
-                                        device_io_request,
-                                        NtStatus::NOT_SUPPORTED,
-                                    ),
-                                    buffer: None,
-                                },
-                            ),
-                        )])
-                    }
+                    let (status, buffer) = match directory_entry(&file_class, &meta, file_name) {
+                        Some(entry) => (NtStatus::SUCCESS, Some(entry)),
+                        None => {
+                            debug!(
+                                "unsupported file class for query directory: {:?}",
+                                file_class
+                            );
+                            (NtStatus::NOT_SUPPORTED, None)
+                        }
+                    };
+                    Ok(vec![SvcMessage::from(
+                        RdpdrPdu::ClientDriveQueryDirectoryResponse(
+                            ClientDriveQueryDirectoryResponse {
+                                device_io_reply: DeviceIoResponse::new(device_io_request, status),
+                                buffer,
+                            },
+                        ),
+                    )])
                 }
                 Err(error) => {
                     // File may have been deleted between listing and metadata fetch (normal for IPC)
@@ -557,5 +534,63 @@ fn make_query_dir_resp(
                 }
             }
         }
+    }
+}
+
+/// Build one directory entry in the requested class, or `None` for a class the server may not
+/// send for a drive (MS-RDPEFS 2.2.3.3.10 lists the four below).
+///
+/// Each response carries a single entry, so `NextEntryOffset` stays 0 (MS-FSCC 2.4: the last
+/// entry's offset is 0) and no inter-entry alignment padding is needed.
+pub(super) fn directory_entry(
+    file_class: &FileInformationClassLevel,
+    meta: &fs::Metadata,
+    file_name: &str,
+) -> Option<FileInformationClass> {
+    let creation_time = get_creation_time(meta);
+    let last_access_time = get_last_access_time(meta);
+    let last_write_time = get_last_write_time(meta);
+    let size = i64::try_from(meta.len()).unwrap_or(0);
+    let attributes = get_file_attributes(meta, file_name);
+    let name = file_name.to_owned();
+
+    match *file_class {
+        FileInformationClassLevel::FILE_DIRECTORY_INFORMATION => Some(
+            FileInformationClass::Directory(FileDirectoryInformation::new(
+                creation_time,
+                last_access_time,
+                last_write_time,
+                last_write_time,
+                size,
+                attributes,
+                name,
+            )),
+        ),
+        FileInformationClassLevel::FILE_FULL_DIRECTORY_INFORMATION => Some(
+            FileInformationClass::FullDirectory(FileFullDirectoryInformation::new(
+                creation_time,
+                last_access_time,
+                last_write_time,
+                last_write_time,
+                size,
+                attributes,
+                name,
+            )),
+        ),
+        FileInformationClassLevel::FILE_BOTH_DIRECTORY_INFORMATION => Some(
+            FileInformationClass::BothDirectory(FileBothDirectoryInformation::new(
+                creation_time,
+                last_access_time,
+                last_write_time,
+                last_write_time,
+                size,
+                attributes,
+                name,
+            )),
+        ),
+        FileInformationClassLevel::FILE_NAMES_INFORMATION => {
+            Some(FileInformationClass::Names(FileNamesInformation::new(name)))
+        }
+        _ => None,
     }
 }
