@@ -1,0 +1,3 @@
+# The Rust install step runs these under sh on Windows CI, where checkout would convert them to CRLF.
+*.sh text eol=lf
+rust-toolchain.toml text eol=lf
