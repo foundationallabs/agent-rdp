@@ -13,6 +13,7 @@ use super::helpers::{
     get_creation_time, get_disk_space, get_file_attributes, get_last_access_time,
     get_last_write_time,
 };
+use super::path::resolve_in_drive;
 use super::MultiDriveBackend;
 
 /// State for directory iteration.
@@ -376,14 +377,12 @@ pub fn query_directory(
             if req_inner.initial_query > 0 {
                 if req_inner.path.ends_with('*') {
                     // Wildcard query - list directory contents
-                    let query_path = req_inner.path.replace('\\', "/");
-                    let len = query_path.len();
-                    // Strip the trailing * and any leading slashes
-                    let dir_path_str = query_path[..len - 1].trim_start_matches('/');
-                    let dir_path = if dir_path_str.is_empty() {
-                        base_path.clone()
-                    } else {
-                        base_path.join(dir_path_str)
+                    let dir_remote = &req_inner.path[..req_inner.path.len() - 1];
+                    let dir_path = match resolve_in_drive(&base_path, dir_remote) {
+                        Ok(path) => path,
+                        Err(status) => {
+                            return Ok(query_directory_refusal(req_inner.device_io_request, status))
+                        }
                     };
 
                     if let Ok(read_dir) = fs::read_dir(&dir_path) {
@@ -407,12 +406,11 @@ pub fn query_directory(
                     }
                 } else {
                     // Specific file query
-                    let query_path = req_inner.path.replace('\\', "/");
-                    let query_path = query_path.trim_start_matches('/');
-                    let full_path = if query_path.is_empty() {
-                        base_path.clone()
-                    } else {
-                        base_path.join(query_path)
+                    let full_path = match resolve_in_drive(&base_path, &req_inner.path) {
+                        Ok(path) => path,
+                        Err(status) => {
+                            return Ok(query_directory_refusal(req_inner.device_io_request, status))
+                        }
                     };
                     find_file_path = Some(full_path);
                 }
@@ -459,6 +457,18 @@ pub fn query_directory(
             )])
         }
     }
+}
+
+fn query_directory_refusal(
+    device_io_request: DeviceIoRequest,
+    status: NtStatus,
+) -> Vec<SvcMessage> {
+    vec![SvcMessage::from(
+        RdpdrPdu::ClientDriveQueryDirectoryResponse(ClientDriveQueryDirectoryResponse {
+            device_io_reply: DeviceIoResponse::new(device_io_request, status),
+            buffer: None,
+        }),
+    )]
 }
 
 fn make_query_dir_resp(

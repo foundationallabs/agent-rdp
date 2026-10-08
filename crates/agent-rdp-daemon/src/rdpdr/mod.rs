@@ -5,6 +5,7 @@
 
 mod file_ops;
 mod helpers;
+mod path;
 mod query_ops;
 mod set_ops;
 
@@ -157,3 +158,6 @@ impl RdpdrBackend for MultiDriveBackend {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
