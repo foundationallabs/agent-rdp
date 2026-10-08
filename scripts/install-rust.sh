@@ -2,10 +2,12 @@
 # Install the toolchain pinned in rust-toolchain.toml. Extra arguments go to rustup,
 # e.g. `--target aarch64-apple-darwin`.
 set -eu
-channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$(dirname "$0")/../rust-toolchain.toml")
-if [ -z "$channel" ]; then
-  echo "rust-toolchain.toml has no channel" >&2
+toml="$(dirname "$0")/../rust-toolchain.toml"
+channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$toml")
+profile=$(sed -n 's/^profile = "\(.*\)"$/\1/p' "$toml")
+if [ -z "$channel" ] || [ -z "$profile" ]; then
+  echo "rust-toolchain.toml needs a channel and a profile" >&2
   exit 1
 fi
-rustup toolchain install "$channel" --profile minimal "$@"
-rustc --version
+rustup toolchain install "$channel" --profile "$profile" "$@"
+rustc +"$channel" --version
