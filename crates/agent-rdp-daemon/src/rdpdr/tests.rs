@@ -564,3 +564,30 @@ fn read_returns_the_file_bytes_and_nothing_past_eof() {
         (NtStatus::SUCCESS, Vec::new())
     );
 }
+
+#[test]
+fn write_at_an_offset_overwrites_in_place() {
+    // FILE_OPEN_IF, as cmd sends for `>>`; FILE_OPEN opens read-only today regardless of DesiredAccess.
+    let mut fx = Fixture::new();
+    let (status, file_id) = fx.create("\\sub\\file.txt", CreateDisposition::FILE_OPEN_IF);
+    assert_eq!(status, NtStatus::SUCCESS);
+    let messages = fx
+        .backend
+        .handle_drive_io_request(ServerDriveIoRequest::DeviceWriteRequest(
+            DeviceWriteRequest {
+                device_io_request: io_request(
+                    MajorFunction::Write,
+                    MinorFunction::from(0),
+                    file_id,
+                ),
+                offset: 2,
+                write_data: b"SID".to_vec(),
+            },
+        ))
+        .unwrap();
+    assert_eq!(io_status(&messages), NtStatus::SUCCESS);
+    assert_eq!(
+        fx.read(file_id, 0, 4096),
+        (NtStatus::SUCCESS, b"inSIDe".to_vec())
+    );
+}
