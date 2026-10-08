@@ -3,8 +3,8 @@
 # e.g. `--target aarch64-apple-darwin`.
 set -eu
 toml="$(dirname "$0")/../rust-toolchain.toml"
-channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$toml")
-profile=$(sed -n 's/^profile = "\(.*\)"$/\1/p' "$toml")
+channel=$(tr -d '\r' < "$toml" | sed -n 's/^channel = "\(.*\)"$/\1/p')
+profile=$(tr -d '\r' < "$toml" | sed -n 's/^profile = "\(.*\)"$/\1/p')
 if [ -z "$channel" ] || [ -z "$profile" ]; then
   echo "rust-toolchain.toml needs a channel and a profile" >&2
   exit 1
