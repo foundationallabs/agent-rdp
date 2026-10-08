@@ -634,6 +634,9 @@ fn enumeration_skips_symlinks() {
                 assert_ne!(i64_at(entry, 40), OUTSIDE_SIZE as i64, "{class:?} {name}");
             }
         }
+        // A folder of links lists as empty, not as missing: the folder itself resolves.
+        let (status, _) = directory_entry_bytes(&fx.directory_request(class, true, "\\only-links"));
+        assert_eq!(status, NtStatus::SUCCESS, "{class:?}");
         assert!(
             enumerate(&mut fx, class, "\\only-links\\*").is_empty(),
             "{class:?}"

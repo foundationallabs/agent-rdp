@@ -403,8 +403,9 @@ pub fn query_directory(
                             return Ok(query_directory_refusal(req_inner.device_io_request, status))
                         }
                     };
-                    // The resolver refused any symlink below the drive, so following links here
-                    // can only reach the operator-configured drive folder itself.
+                    // The resolver refused any symlink below the drive, so the only link followed here
+                    // is a symlinked drive folder (barring a local process swapping in a link after the
+                    // check).
                     found = match fs::metadata(&full_path) {
                         Ok(meta) => Some((full_path, meta)),
                         Err(error) => {
@@ -535,7 +536,7 @@ pub(super) fn directory_entry(
     let last_access_time = get_last_access_time(meta);
     let last_write_time = get_last_write_time(meta);
     // NTFS reports 0 for a directory's EndOfFile and AllocationSize; a Unix directory's st_size
-    // is its own block size, which `dir` would add to the folder's byte total.
+    // is a filesystem-specific nonzero value, which `dir` would add to the folder's byte total.
     let size = if meta.is_dir() {
         0
     } else {
