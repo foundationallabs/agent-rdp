@@ -7,11 +7,13 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { RdpSession } from '../dist/index.js';
+import { RdpError, RdpSession } from '../dist/index.js';
 import { getSessionDir, getSocketPath } from '../dist/client.js';
 
+const CONNECTED = { success: true, data: { type: 'connected', host: 'h', width: 1, height: 1 } };
+
 /** Start a fake daemon for a fresh session; resolves with the session name and received requests. */
-async function startFakeDaemon() {
+async function startFakeDaemon(response = CONNECTED) {
   const session = `sdk-test-${randomUUID().slice(0, 8)}`;
   const dir = getSessionDir(session);
   fs.mkdirSync(dir, { recursive: true });
@@ -30,7 +32,6 @@ async function startFakeDaemon() {
         const line = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 1);
         requests.push(JSON.parse(line));
-        const response = { success: true, data: { type: 'connected', host: 'h', width: 1, height: 1 } };
         socket.write(JSON.stringify(response) + '\n');
       }
     });
@@ -110,4 +111,48 @@ test('connect sends enable_credssp false when enableNla is false', async () => {
 test('connect omits enable_credssp when enableNla is unset so the daemon keeps NLA on', async () => {
   const payload = await connectPayload({}, {});
   assert.equal('enable_credssp' in payload, false);
+});
+
+test('connect sends server_cert_pin when serverCertPin is set', async () => {
+  const pin = 'sha256/v0ED3aaQaqkZx0eWMgIKcV21wFokPfvCkSa1dZpbHNA=';
+  const payload = await connectPayload({}, { serverCertPin: pin });
+  assert.equal(payload.server_cert_pin, pin);
+});
+
+test('connect omits server_cert_pin when serverCertPin is unset', async () => {
+  const payload = await connectPayload({}, {});
+  assert.equal('server_cert_pin' in payload, false);
+});
+
+async function connectError(response) {
+  const daemon = await startFakeDaemon(response);
+  try {
+    const rdp = new RdpSession({ session: daemon.session, timeout: 5000 });
+    return await rdp.connect({ host: 'h', username: 'u', password: 'p' }).then(
+      () => assert.fail('connect should have failed'),
+      (error) => error,
+    );
+  } finally {
+    await daemon.close();
+  }
+}
+
+test('a refused login throws RdpError with the reason', async () => {
+  const error = await connectError({
+    success: false,
+    error: { code: 'authentication_failed', message: 'refused', reason: 'wrong_password' },
+  });
+  assert.ok(error instanceof RdpError);
+  assert.equal(error.code, 'authentication_failed');
+  assert.equal(error.reason, 'wrong_password');
+});
+
+test('a pin mismatch throws RdpError with certificate_mismatch and no reason', async () => {
+  const error = await connectError({
+    success: false,
+    error: { code: 'certificate_mismatch', message: 'key differs' },
+  });
+  assert.ok(error instanceof RdpError);
+  assert.equal(error.code, 'certificate_mismatch');
+  assert.equal(error.reason, undefined);
 });
