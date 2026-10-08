@@ -206,8 +206,6 @@ impl RdpSession {
         info!("Connecting to {}:{}", config.host, config.port);
 
         let connector_config = build_connector_config(&config);
-        // With NLA off the server checks the password only after the connection is up.
-        let await_logon = !config.enable_credssp;
 
         // Establish TCP connection
         let addr = format!("{}:{}", config.host, config.port);
@@ -297,6 +295,9 @@ impl RdpSession {
 
         // Mark upgrade as done
         let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
+        // Without CredSSP the server checks the password only after the connection is up. Read
+        // what the server selected: it can pick TLS-only even when the client offered NLA.
+        let await_logon = !connector.should_perform_credssp();
 
         // Create framed transport for upgraded connection
         let mut upgraded_framed: TokioFramed<tokio_rustls::client::TlsStream<TcpStream>> =
