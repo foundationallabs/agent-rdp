@@ -407,6 +407,7 @@ export class RdpSession {
       throw new RdpError(
         response.error?.code ?? 'internal_error',
         response.error?.message ?? 'Unknown error',
+        response.error?.reason,
       );
     }
 

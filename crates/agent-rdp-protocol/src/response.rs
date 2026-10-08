@@ -52,6 +52,23 @@ impl Response {
             error: Some(ErrorInfo {
                 code,
                 message: message.into(),
+                reason: None,
+            }),
+        }
+    }
+
+    /// Create an `authentication_failed` error response.
+    pub fn authentication_failed(
+        reason: Option<AuthFailureReason>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            success: false,
+            data: None,
+            error: Some(ErrorInfo {
+                code: ErrorCode::AuthenticationFailed,
+                message: message.into(),
+                reason,
             }),
         }
     }
@@ -246,6 +263,56 @@ pub struct ErrorInfo {
     pub code: ErrorCode,
     /// Human-readable error message.
     pub message: String,
+    /// Why the login was refused, when the server said. Only set with `authentication_failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<AuthFailureReason>,
+}
+
+/// Why the server refused a login.
+///
+/// CredSSP (NLA) failures carry the NTSTATUS the server returned; NLA-off failures carry the
+/// Save Session Info logon error (MS-RDPBCGR 2.2.10.1.1.4.1.1).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/agent-rdp/src/generated/")]
+#[serde(rename_all = "snake_case")]
+pub enum AuthFailureReason {
+    /// STATUS_LOGON_FAILURE: unknown user name or bad password.
+    LogonFailure,
+    /// STATUS_WRONG_PASSWORD.
+    WrongPassword,
+    /// STATUS_NO_SUCH_USER.
+    NoSuchUser,
+    /// STATUS_ACCOUNT_LOCKED_OUT.
+    AccountLockedOut,
+    /// STATUS_ACCOUNT_DISABLED.
+    AccountDisabled,
+    /// STATUS_ACCOUNT_RESTRICTION.
+    AccountRestriction,
+    /// STATUS_PASSWORD_EXPIRED.
+    PasswordExpired,
+    /// STATUS_PASSWORD_MUST_CHANGE.
+    PasswordMustChange,
+    /// STATUS_INVALID_LOGON_HOURS.
+    InvalidLogonHours,
+    /// STATUS_INVALID_WORKSTATION.
+    InvalidWorkstation,
+    /// STATUS_LOGON_NOT_GRANTED.
+    LogonNotGranted,
+    /// STATUS_LOGON_TYPE_NOT_GRANTED.
+    LogonTypeNotGranted,
+    /// SEC_E_LOGON_DENIED without a more specific status.
+    LogonDenied,
+    /// CredSSP early user authorization result, or the logon error type ACCESS_DENIED.
+    AccessDenied,
+    /// NLA off: LOGON_FAILED_BAD_PASSWORD.
+    LogonFailedBadPassword,
+    /// NLA off: LOGON_FAILED_UPDATE_PASSWORD.
+    LogonFailedUpdatePassword,
+    /// NLA off: LOGON_FAILED_OTHER.
+    LogonFailedOther,
+    /// NLA off: LOGON_MSG_NO_PERMISSION.
+    NoPermission,
 }
 
 /// Error codes for structured error handling.
@@ -350,6 +417,30 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"success\":false"));
         assert!(json.contains("\"code\":\"connection_failed\""));
+    }
+
+    #[test]
+    fn error_response_omits_reason() {
+        let json = serde_json::to_value(Response::error(ErrorCode::ConnectionFailed, "x")).unwrap();
+        assert!(json["error"].get("reason").is_none());
+    }
+
+    #[test]
+    fn authentication_failed_carries_reason() {
+        let resp = Response::authentication_failed(Some(AuthFailureReason::AccountLockedOut), "locked");
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["error"]["code"], "authentication_failed");
+        assert_eq!(json["error"]["reason"], "account_locked_out");
+
+        let back: Response = serde_json::from_value(json).unwrap();
+        assert_eq!(back.error.unwrap().reason, Some(AuthFailureReason::AccountLockedOut));
+    }
+
+    #[test]
+    fn error_info_without_reason_still_parses() {
+        let info: ErrorInfo =
+            serde_json::from_str(r#"{"code":"authentication_failed","message":"m"}"#).unwrap();
+        assert_eq!(info.reason, None);
     }
 
     #[test]

@@ -27,6 +27,7 @@ export type {
   ResponseData,
   ErrorCode,
   ErrorInfo,
+  AuthFailureReason,
   SessionInfo,
   SessionSummary,
   MappedDrive,
@@ -63,7 +64,7 @@ export type {
 // --- SDK Convenience Types ---
 // These are higher-level types for the SDK API, not IPC.
 
-import type { DriveMapping, ErrorCode } from './generated/index.js';
+import type { AuthFailureReason, DriveMapping, ErrorCode } from './generated/index.js';
 
 /** Options for connecting to an RDP session. */
 export interface ConnectOptions {
@@ -197,6 +198,8 @@ export class RdpError extends Error {
   constructor(
     public code: ErrorCode,
     message: string,
+    /** Why the login was refused, when the server said. Only set with `authentication_failed`. */
+    public reason?: AuthFailureReason,
   ) {
     super(message);
     this.name = 'RdpError';

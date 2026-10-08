@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use parking_lot::RwLock;
@@ -10,8 +11,10 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use agent_rdp_protocol::DriveMapping;
-use ironrdp::connector::{self, ClientConnector, ConnectorResult, Credentials, ServerName};
+use agent_rdp_protocol::{AuthFailureReason, DriveMapping};
+use ironrdp::connector::{
+    self, ClientConnector, ConnectorError, ConnectorResult, Credentials, ServerName,
+};
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
@@ -22,6 +25,7 @@ use ironrdp_dvc::DrdynvcClient;
 use ironrdp_rdpdr::Rdpdr;
 
 use crate::automation::{AutomationDvc, SharedDvcState};
+use crate::logon::{self, LogonOutcome, LogonReport, LogonWatch};
 use crate::rdpdr::MultiDriveBackend;
 use ironrdp_rdpsnd::client::{NoopRdpsndBackend, Rdpsnd};
 use ironrdp_tokio::{FramedWrite, TokioFramed};
@@ -34,8 +38,8 @@ pub enum RdpError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
 
-    #[error("Authentication failed")]
-    AuthenticationFailed,
+    #[error("Authentication failed ({0:?})")]
+    AuthenticationFailed(AuthFailureReason),
 
     #[error("TLS error: {0}")]
     TlsError(String),
@@ -55,6 +59,19 @@ pub enum RdpError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 }
+
+impl From<ConnectorError> for RdpError {
+    fn from(error: ConnectorError) -> Self {
+        match logon::connector_auth_failure(&error) {
+            Some(reason) => Self::AuthenticationFailed(reason),
+            None => Self::ConnectionFailed(error.to_string()),
+        }
+    }
+}
+
+/// How long an NLA-off `connect()` waits for the server to report the login result. Short of
+/// the SDK's 30 s default request timeout, so the connect response still reaches the caller.
+const LOGON_OUTCOME_WINDOW: Duration = Duration::from_secs(20);
 
 /// Configuration for an RDP connection.
 pub struct RdpConfig {
@@ -175,6 +192,8 @@ impl RdpSession {
         info!("Connecting to {}:{}", config.host, config.port);
 
         let connector_config = build_connector_config(&config);
+        // With NLA off the server checks the password only after the connection is up.
+        let await_logon = !config.enable_credssp;
 
         // Establish TCP connection
         let addr = format!("{}:{}", config.host, config.port);
@@ -252,9 +271,7 @@ impl RdpSession {
         };
 
         // Begin connection (pre-TLS)
-        let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
-            .await
-            .map_err(|e| RdpError::ConnectionFailed(e.to_string()))?;
+        let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector).await?;
 
         // Perform TLS upgrade
         let initial_stream: TcpStream = framed.into_inner_no_leftover();
@@ -289,8 +306,7 @@ impl RdpSession {
             server_public_key,
             None, // No Kerberos
         )
-        .await
-        .map_err(|e| RdpError::ConnectionFailed(e.to_string()))?;
+        .await?;
 
         info!("RDP connection established to {}", config.host);
 
@@ -300,6 +316,14 @@ impl RdpSession {
             connection_result.desktop_size.width,
             connection_result.desktop_size.height,
         );
+
+        let (logon_tx, logon_rx) = if await_logon {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        let logon_watch = LogonWatch::new(connection_result.io_channel_id, logon_tx);
 
         // Create active stage for ongoing communication
         let active_stage = ActiveStage::new(connection_result);
@@ -328,9 +352,30 @@ impl RdpSession {
                 disconnect_notify,
                 clipboard_backend_rx,
                 dvc_command_rx,
+                logon_watch,
             )
             .await;
         });
+
+        if let Some(logon_rx) = logon_rx {
+            match logon::await_logon_report(logon_rx, LOGON_OUTCOME_WINDOW).await {
+                Some(LogonReport::Outcome(LogonOutcome::Failed(reason))) => {
+                    return Err(RdpError::AuthenticationFailed(reason));
+                }
+                Some(LogonReport::Outcome(LogonOutcome::Succeeded)) => {
+                    info!("Server confirmed the login");
+                }
+                Some(LogonReport::SessionEnded) => {
+                    return Err(RdpError::ConnectionFailed(
+                        "Connection closed before the login completed".to_string(),
+                    ));
+                }
+                None => warn!(
+                    "No login result from the server within {:?}; continuing with the outcome unknown",
+                    LOGON_OUTCOME_WINDOW
+                ),
+            }
+        }
 
         Ok(Self {
             shared,
@@ -542,9 +587,11 @@ async fn run_frame_processor(
     disconnect_notify: Option<DisconnectNotify>,
     mut clipboard_backend_rx: mpsc::UnboundedReceiver<clipboard::BackendMessage>,
     mut dvc_command_rx: Option<DvcCommandReceiver>,
+    mut logon_watch: LogonWatch,
 ) {
     info!("Frame processor started");
     let mut graceful_shutdown = false;
+    let mut end = LogonReport::SessionEnded;
 
     loop {
         tokio::select! {
@@ -717,12 +764,14 @@ async fn run_frame_processor(
                                 error!("Failed to send response frame: {}", e);
                             }
                         }
+                        if let Some(reason) = logon_watch.observe(action, &payload) {
+                            // Leave no session sitting at the Windows logon screen.
+                            warn!(?reason, "Server rejected the login, ending the session");
+                            end = LogonReport::Outcome(LogonOutcome::Failed(reason));
+                            break;
+                        }
                         if should_terminate {
-                            // Server-initiated termination - notify daemon
-                            if let Some(notify) = disconnect_notify {
-                                let _ = notify.send(()).await;
-                            }
-                            return;
+                            break;
                         }
                     }
                     Err(e) => {
@@ -804,8 +853,10 @@ async fn run_frame_processor(
 
     info!("Frame processor stopped (graceful={})", graceful_shutdown);
 
-    // Notify daemon of connection drop (unless this was a graceful shutdown)
-    if !graceful_shutdown {
+    // A connect() still waiting for the login answers its caller itself. Otherwise notify the
+    // daemon of the connection drop (unless this was a graceful shutdown).
+    let connect_reports = logon_watch.finish(end);
+    if !graceful_shutdown && !connect_reports {
         if let Some(notify) = disconnect_notify {
             info!("Notifying daemon of connection drop");
             let _ = notify.send(()).await;
@@ -983,7 +1034,28 @@ fn create_key_event(scancode: u8, extended: bool, release: bool) -> FastPathInpu
 
 #[cfg(test)]
 mod tests {
+    use ironrdp::connector::sspi::{self, credssp::NStatusCode};
+    use ironrdp::connector::ConnectorErrorKind;
+
     use super::*;
+
+    #[test]
+    fn refused_login_connector_error_is_authentication_failed() {
+        let refused = ConnectorError::new(
+            "CredSSP",
+            ConnectorErrorKind::Credssp(sspi::Error::new_with_nstatus(
+                sspi::ErrorKind::InvalidToken,
+                "CredSSP server returned an error status",
+                NStatusCode::WRONG_PASSWORD,
+            )),
+        );
+        assert!(matches!(
+            RdpError::from(refused),
+            RdpError::AuthenticationFailed(AuthFailureReason::WrongPassword)
+        ));
+        let other = ConnectorError::new("connect", ConnectorErrorKind::General);
+        assert!(matches!(RdpError::from(other), RdpError::ConnectionFailed(_)));
+    }
 
     fn test_config(alternate_shell: Option<&str>) -> RdpConfig {
         RdpConfig {

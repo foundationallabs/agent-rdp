@@ -8,8 +8,19 @@ use tracing::{info, warn};
 
 use crate::automation::{AutomationBootstrap, SharedAutomationState, SharedDvcState};
 use crate::daemon::{ClipboardChangedRx, SharedWsHandle};
-use crate::rdp_session::{DisconnectNotify, RdpConfig, RdpSession};
+use crate::rdp_session::{DisconnectNotify, RdpConfig, RdpError, RdpSession};
 use crate::ws_server::{get_stream_fps, WsServer, WsServerConfig};
+
+/// The response for a failed connect. Only a refused login is `authentication_failed`; the
+/// session manager retries every other failure.
+fn connect_error_response(error: &RdpError) -> Response {
+    match error {
+        RdpError::AuthenticationFailed(reason) => {
+            Response::authentication_failed(Some(*reason), error.to_string())
+        }
+        _ => Response::error(ErrorCode::ConnectionFailed, error.to_string()),
+    }
+}
 
 /// Map a connect request onto the RDP session configuration.
 ///
@@ -118,13 +129,7 @@ pub async fn handle(
     // Attempt connection
     let rdp = match RdpSession::connect(config, Some(disconnect_notify)).await {
         Ok(rdp) => rdp,
-        Err(e) => {
-            let code = match &e {
-                crate::rdp_session::RdpError::AuthenticationFailed => ErrorCode::AuthenticationFailed,
-                _ => ErrorCode::ConnectionFailed,
-            };
-            return Response::error(code, e.to_string());
-        }
+        Err(e) => return connect_error_response(&e),
     };
 
     let host = rdp.host();
@@ -254,7 +259,31 @@ pub async fn handle_disconnect(
 
 #[cfg(test)]
 mod tests {
+    use agent_rdp_protocol::AuthFailureReason;
+
     use super::*;
+
+    #[test]
+    fn refused_login_is_authentication_failed_with_reason() {
+        let response = connect_error_response(&RdpError::AuthenticationFailed(
+            AuthFailureReason::AccountLockedOut,
+        ));
+        let error = response.error.unwrap();
+        assert_eq!(error.code, ErrorCode::AuthenticationFailed);
+        assert_eq!(error.reason, Some(AuthFailureReason::AccountLockedOut));
+    }
+
+    #[test]
+    fn other_connect_failures_are_connection_failed() {
+        for error in [
+            RdpError::ConnectionFailed("refused".to_string()),
+            RdpError::TlsError("handshake".to_string()),
+        ] {
+            let error = connect_error_response(&error).error.unwrap();
+            assert_eq!(error.code, ErrorCode::ConnectionFailed);
+            assert_eq!(error.reason, None);
+        }
+    }
 
     fn drive(name: &str) -> DriveMapping {
         DriveMapping {

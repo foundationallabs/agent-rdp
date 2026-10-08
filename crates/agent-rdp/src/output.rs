@@ -259,14 +259,10 @@ impl Output {
     /// Print an error message.
     pub fn print_error(&self, code: &str, message: &str) {
         if self.json {
-            let response = agent_rdp_protocol::Response {
-                success: false,
-                data: None,
-                error: Some(agent_rdp_protocol::ErrorInfo {
-                    code: agent_rdp_protocol::ErrorCode::InternalError,
-                    message: message.to_string(),
-                }),
-            };
+            let response = agent_rdp_protocol::Response::error(
+                agent_rdp_protocol::ErrorCode::InternalError,
+                message,
+            );
             println!("{}", serde_json::to_string(&response).unwrap());
         } else {
             eprintln!("Error [{}]: {}", code, message);
