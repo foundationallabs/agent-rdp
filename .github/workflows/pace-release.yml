@@ -21,8 +21,27 @@ jobs:
       - name: Install Rust
         run: sh scripts/install-rust.sh
 
-      - name: Test
+      - name: Test Rust
         run: cargo test --locked --workspace
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@eae0cfeb286e66ffb5155f1a79b90583a127a68b # v2.4.1
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm install --ignore-scripts
+
+      - name: Build TypeScript
+        run: pnpm --filter ./packages/agent-rdp run build:ts
+
+      - name: Test TypeScript
+        run: pnpm --filter ./packages/agent-rdp run test
 
   # Linux builds run in an ubuntu:22.04 container (glibc 2.35) for broad compatibility.
   # Without this, ubuntu-latest (24.04) produces binaries requiring glibc 2.39+.
