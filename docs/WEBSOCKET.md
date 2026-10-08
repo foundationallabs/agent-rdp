@@ -23,8 +23,8 @@ agent-rdp --stream-port 9224 connect --host 192.168.1.100 -u Admin -p secret
 
 The daemon serves both the WebSocket API and an embedded HTML viewer on the same port:
 
-- **HTML Viewer**: `http://localhost:{port}` (e.g., `http://localhost:9224`)
-- **WebSocket API**: `ws://localhost:{port}` (e.g., `ws://localhost:9224`)
+- **HTML Viewer**: `http://127.0.0.1:{port}` (e.g., `http://127.0.0.1:9224`)
+- **WebSocket API**: `ws://127.0.0.1:{port}` (e.g., `ws://127.0.0.1:9224`)
 
 The port automatically detects whether an incoming request is a WebSocket upgrade or regular HTTP and responds appropriately.
 
@@ -299,13 +299,13 @@ agent-rdp --stream-port 9224 connect --host 192.168.1.100 -u Admin -p secret
 agent-rdp view --port 9224
 
 # Open viewer (method 2: direct browser access)
-# Navigate to http://localhost:9224 in your browser
+# Navigate to http://127.0.0.1:9224 in your browser
 ```
 
 ### Programmatic Access
 
 ```javascript
-const ws = new WebSocket('ws://localhost:9224');
+const ws = new WebSocket('ws://127.0.0.1:9224');
 
 ws.onmessage = async (event) => {
   const msg = JSON.parse(event.data);

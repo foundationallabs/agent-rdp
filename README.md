@@ -422,7 +422,7 @@ const rdp = new RdpSession({
 await rdp.connect({...});
 
 // Connect your WebSocket client to receive JPEG frames
-const streamUrl = rdp.getStreamUrl(); // "ws://localhost:9224"
+const streamUrl = rdp.getStreamUrl(); // "ws://127.0.0.1:9224"
 ```
 
 For the complete WebSocket protocol specification (message types, clipboard flow, input handling), see [WEBSOCKET.md](https://github.com/thisnick/agent-rdp/blob/main/docs/WEBSOCKET.md).

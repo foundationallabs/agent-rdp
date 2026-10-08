@@ -54,7 +54,7 @@ export interface RdpSessionOptions {
   session?: string;
   /** Request timeout in milliseconds (default: 30000) */
   timeout?: number;
-  /** WebSocket streaming port (0 = disabled). Connect to ws://localhost:<port> for frames. */
+  /** WebSocket streaming port (0 = disabled). Connect to ws://127.0.0.1:<port> for frames. */
   streamPort?: number;
   /** Serve the embedded HTML viewer on the streaming port (default: false). */
   serveViewer?: boolean;
@@ -390,7 +390,7 @@ export class RdpSession {
     if (this.streamPort === 0) {
       return null;
     }
-    return `ws://localhost:${this.streamPort}`;
+    return `ws://127.0.0.1:${this.streamPort}`;
   }
 
   /**
