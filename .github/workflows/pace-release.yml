@@ -19,9 +19,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch
-        with:
-          toolchain: stable
+        run: sh scripts/install-rust.sh
 
       - name: Test
         run: cargo test --locked --workspace
@@ -53,7 +51,9 @@ jobs:
 
       - name: Install Rust
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          . "$HOME/.cargo/env"
+          sh scripts/install-rust.sh --target ${{ matrix.target }}
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Build
@@ -82,10 +82,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch
-        with:
-          toolchain: stable
-          targets: aarch64-apple-darwin
+        run: sh scripts/install-rust.sh --target aarch64-apple-darwin
 
       - name: Build
         run: cargo build --release --locked --target aarch64-apple-darwin
