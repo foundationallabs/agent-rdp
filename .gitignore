@@ -7,7 +7,6 @@
 /target/
 /dist/
 /bin/
-Cargo.lock
 
 # TypeScript build output
 packages/agent-rdp/dist/
