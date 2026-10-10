@@ -94,6 +94,8 @@ struct Script {
     session_continue: SessionContinue,
     /// What a confirming server sends.
     confirmation: InfoData,
+    /// How long the server waits before the MCS Connect Response, before any credentials.
+    connect_delay: Duration,
     /// How long the server waits after the Client Info PDU before it answers.
     license_delay: Duration,
     alternate_shell: Option<String>,
@@ -109,6 +111,7 @@ impl Script {
             offer_nla: false,
             session_continue: SessionContinue::Never,
             confirmation: InfoData::PlainNotify,
+            connect_delay: Duration::ZERO,
             license_delay: Duration::ZERO,
             alternate_shell: None,
             logon_window: None,
@@ -196,6 +199,7 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Option<Instant> {
     let mut tls = tls_acceptor().accept(tcp).await.unwrap();
 
     read_frame(&mut tls).await; // MCS Connect Initial
+    tokio::time::sleep(script.connect_delay).await;
     write_frame(
         &mut tls,
         &X224(X224Data {
@@ -494,15 +498,18 @@ async fn a_stall_after_the_credentials_is_an_unconfirmed_login() {
 #[tokio::test]
 async fn the_logon_window_counts_from_the_credentials_not_the_connect() {
     let logon_window = Duration::from_secs(2);
+    let connect_delay = Duration::from_millis(600);
     let license_delay = Duration::from_millis(1200);
     let run = run(Script {
         logon_window: Some(logon_window),
+        connect_delay,
         license_delay,
         ..Script::new(Stop::SilentAfterConnect, End::Close)
     })
     .await;
     assert_unconfirmed(&run);
-    // A window restarted at the end of the connection sequence would run 1.2 s past the credentials.
+    // A window counted from the connect would end 0.6 s early; one restarted at the end of the
+    // connection sequence would run 1.2 s late.
     let since_credentials = run.since_credentials.unwrap();
     assert!(
         since_credentials + Duration::from_millis(100) >= logon_window

@@ -128,12 +128,15 @@ async fn finalize_without_nla(
             logon_deadline = Some(Instant::now() + logon_window);
         }
         if let ClientConnectorState::Connected { result } = connector.state {
-            let deadline = logon_deadline.ok_or_else(|| {
-                RdpError::ConnectionFailed(
-                    "the server finished the connection before the credentials were sent"
-                        .to_owned(),
-                )
-            })?;
+            // Connected without passing the Client Info step means the connector sent the
+            // credentials somewhere this loop does not mark, so the server may have counted the
+            // attempt. Fail closed rather than as a retryable connection error.
+            let Some(deadline) = logon_deadline else {
+                error!("Connected without a marked Client Info step; failing the login closed");
+                return Err(RdpError::AuthenticationFailed(
+                    AuthFailureReason::LogonUnconfirmed,
+                ));
+            };
             return Ok((result, deadline));
         }
     }

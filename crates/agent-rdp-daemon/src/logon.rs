@@ -78,6 +78,8 @@ pub fn logon_outcome(io_channel_id: u16, action: Action, frame: &[u8]) -> Option
     };
     let info_type = session_info.info_type;
     match session_info.info_data {
+        // All three are logon-success notices in MS-RDPBCGR 2.2.10.1.1. The lab broker farm and
+        // psm02 both confirm a good NLA-off login with LogonInfoV1 (after SESSION_CONTINUE).
         InfoData::LogonInfoV1(_) | InfoData::LogonInfoV2(_) | InfoData::PlainNotify => {
             info!(?info_type, "Server sent a logon notification");
             Some(LogonOutcome::Succeeded)
