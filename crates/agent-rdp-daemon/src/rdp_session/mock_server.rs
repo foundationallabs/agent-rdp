@@ -6,11 +6,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ironrdp::pdu::gcc::{
-    ConferenceCreateResponse, ServerCoreData, ServerCoreOptionalData, ServerEarlyCapabilityFlags,
-    ServerGccBlocks, ServerNetworkData, ServerSecurityData,
+    ClientGccBlocks, ConferenceCreateResponse, ServerCoreData, ServerCoreOptionalData,
+    ServerEarlyCapabilityFlags, ServerGccBlocks, ServerNetworkData, ServerSecurityData,
 };
 use ironrdp::pdu::mcs::{
-    AttachUserConfirm, ConnectResponse, DomainParameters, SendDataIndication, SendDataRequest,
+    AttachUserConfirm, ConnectInitial, ConnectResponse, DomainParameters, SendDataIndication,
+    SendDataRequest,
 };
 use ironrdp::pdu::nego::{ConnectionConfirm, ResponseFlags, SecurityProtocol};
 use ironrdp::pdu::rdp::capability_sets::{DemandActive, ServerDemandActive};
@@ -126,6 +127,15 @@ struct Run {
     credentials_received: bool,
     /// From the server receiving the Client Info PDU to `connect` returning.
     since_credentials: Option<Duration>,
+    /// The GCC blocks of the client's MCS Connect Initial.
+    client_gcc: ClientGccBlocks,
+}
+
+/// What the server saw of one connect.
+struct Served {
+    client_gcc: ClientGccBlocks,
+    /// When the Client Info PDU arrived, if it did.
+    credentials_at: Option<Instant>,
 }
 
 impl Run {
@@ -163,7 +173,10 @@ async fn run(script: Script) -> Run {
     let ended = Instant::now();
     // Dropping the session closes the connection, which a confirming server waits for.
     let result = result.map(drop);
-    let credentials_at = tokio::time::timeout(Duration::from_secs(10), server)
+    let Served {
+        client_gcc,
+        credentials_at,
+    } = tokio::time::timeout(Duration::from_secs(10), server)
         .await
         .expect("server did not finish")
         .unwrap();
@@ -172,6 +185,7 @@ async fn run(script: Script) -> Run {
         elapsed: ended - started,
         credentials_received: credentials_at.is_some(),
         since_credentials: credentials_at.map(|at| ended - at),
+        client_gcc,
     }
 }
 
@@ -183,9 +197,10 @@ fn loopback_config(port: u16, offer_nla: bool, alternate_shell: Option<&str>) ->
     config
 }
 
-/// Runs the server side of the connection sequence up to `stop`. Returns when the Client Info PDU
-/// arrived, if it did (for `ReadAfterAttach`: when the client closed, if any byte arrived).
-async fn serve(mut tcp: TcpStream, script: Script) -> Option<Instant> {
+/// Runs the server side of the connection sequence up to `stop`. Returns the client's GCC blocks
+/// and when the Client Info PDU arrived, if it did (for `ReadAfterAttach`: when the client closed,
+/// if any byte arrived).
+async fn serve(mut tcp: TcpStream, script: Script) -> Served {
     let Script { stop, end, .. } = script;
     read_frame(&mut tcp).await; // X.224 Connection Request
     write_frame(
@@ -198,7 +213,10 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Option<Instant> {
     .await;
     let mut tls = tls_acceptor().accept(tcp).await.unwrap();
 
-    read_frame(&mut tls).await; // MCS Connect Initial
+    let frame = read_frame(&mut tls).await;
+    let data = ironrdp::pdu::decode::<X224<X224Data<'_>>>(&frame).unwrap();
+    let connect_initial = ironrdp::pdu::decode::<ConnectInitial>(&data.0.data).unwrap();
+    let client_gcc = connect_initial.conference_create_request.into_gcc_blocks();
     tokio::time::sleep(script.connect_delay).await;
     write_frame(
         &mut tls,
@@ -211,7 +229,10 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Option<Instant> {
     read_frame(&mut tls).await; // Attach User Request
     if let Stop::BeforeClientInfo = stop {
         finish(tls, end).await;
-        return None;
+        return Served {
+            client_gcc,
+            credentials_at: None,
+        };
     }
 
     write_frame(
@@ -224,7 +245,10 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Option<Instant> {
     .await;
     if let Stop::ReadAfterAttach = stop {
         let received = read_until_closed(&mut tls).await;
-        return (!received.is_empty()).then(Instant::now);
+        return Served {
+            client_gcc,
+            credentials_at: (!received.is_empty()).then(Instant::now),
+        };
     }
     let frame = read_frame(&mut tls).await;
     let request = ironrdp::pdu::decode::<X224<SendDataRequest<'_>>>(&frame).unwrap();
@@ -234,11 +258,17 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Option<Instant> {
     match stop {
         Stop::AfterClientInfo => {
             finish(tls, end).await;
-            return credentials_at;
+            return Served {
+                client_gcc,
+                credentials_at,
+            };
         }
         Stop::StallAfterClientInfo => {
             read_until_closed(&mut tls).await;
-            return credentials_at;
+            return Served {
+                client_gcc,
+                credentials_at,
+            };
         }
         _ => {}
     }
@@ -286,7 +316,10 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Option<Instant> {
         | Stop::AfterClientInfo
         | Stop::StallAfterClientInfo => unreachable!(),
     }
-    credentials_at
+    Served {
+        client_gcc,
+        credentials_at,
+    }
 }
 
 fn session_continue() -> InfoData {
@@ -577,6 +610,27 @@ async fn the_mock_server_completes_a_confirmed_login() {
                 run.result.err()
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn the_client_never_advertises_server_redirection() {
+    // A client that sends TS_UD_CS_CLUSTER with REDIRECTION_SUPPORTED gets Server Redirection PDUs
+    // from an RD Connection Broker farm (lab control, LAB-REPORT-0.8.0.md). agent-rdp does not
+    // follow them, so it must never advertise support. IronRDP 0.9 sends no cluster block; this
+    // fails if an upgrade starts sending one.
+    for offer_nla in [false, true] {
+        let run = run(Script {
+            offer_nla,
+            ..Script::new(Stop::Confirm, End::Close)
+        })
+        .await;
+        assert!(
+            run.result.is_ok(),
+            "offer_nla {offer_nla}: {:?}",
+            run.result.err()
+        );
+        assert_eq!(run.client_gcc.cluster, None, "offer_nla {offer_nla}");
     }
 }
 

@@ -9,6 +9,7 @@
 * In that mode, a connection that ends after the credentials were sent and before Windows confirms the logon (server close, TCP reset, TLS close, a stalled connection sequence) also returns `authentication_failed` / `logon_unconfirmed`, since the server may have counted a login attempt. Previously it returned `connection_failed`, which callers may retry. Failures before the credentials are sent stay `connection_failed`.
 * A `SESSION_CONTINUE` logon notice no longer fails the login. Windows sends it during good logons with the session ID in its data field, which IronRDP decodes as a logon error code for IDs 0-3, so 0.7.x reported a good logon to session 1 or 2 as `authentication_failed`. The daemon now logs that field as `session_id`.
 * SDK: `AuthFailureReason` gains the member `"logon_unconfirmed"`. TypeScript code with an exhaustive `switch` over it needs a new case.
+* The client never advertises Server Redirection support, as in 0.7.x, and a test now pins it. agent-rdp does not follow redirects, and without that flag an RD Connection Broker farm places the session on the dialled host.
 
 ## 0.7.2 (2026-10-08)
 
