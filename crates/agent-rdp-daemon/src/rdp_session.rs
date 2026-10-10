@@ -128,7 +128,12 @@ async fn finalize_without_nla(
             logon_deadline = Some(Instant::now() + logon_window);
         }
         if let ClientConnectorState::Connected { result } = connector.state {
-            let deadline = logon_deadline.unwrap_or_else(|| Instant::now() + logon_window);
+            let deadline = logon_deadline.ok_or_else(|| {
+                RdpError::ConnectionFailed(
+                    "the server finished the connection before the credentials were sent"
+                        .to_owned(),
+                )
+            })?;
             return Ok((result, deadline));
         }
     }

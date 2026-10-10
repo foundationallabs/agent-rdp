@@ -219,7 +219,8 @@ mod tests {
         CompressionFlags, ShareControlHeader, ShareControlPdu, ShareDataHeader, StreamPriority,
     };
     use ironrdp::pdu::rdp::session_info::{
-        InfoType, LogonExFlags, LogonInfoExtended, SaveSessionInfoPdu,
+        InfoType, LogonExFlags, LogonInfo, LogonInfoExtended, LogonInfoVersion1, LogonInfoVersion2,
+        SaveSessionInfoPdu,
     };
     use ironrdp::pdu::x224::X224;
 
@@ -447,13 +448,34 @@ mod tests {
     }
 
     #[test]
-    fn logon_notification_is_a_success() {
-        let frame =
-            save_session_info_frame(IO_CHANNEL, InfoType::PlainNotify, InfoData::PlainNotify);
-        assert_eq!(
-            logon_outcome(IO_CHANNEL, Action::X224, &frame),
-            Some(LogonOutcome::Succeeded)
-        );
+    fn every_logon_notification_is_a_success() {
+        let logon_info = || LogonInfo {
+            session_id: 2,
+            user_name: "user".to_string(),
+            domain_name: "LAB".to_string(),
+        };
+        for (info_type, info_data) in [
+            (
+                InfoType::Logon,
+                InfoData::LogonInfoV1(LogonInfoVersion1 {
+                    logon_info: logon_info(),
+                }),
+            ),
+            (
+                InfoType::LogonLong,
+                InfoData::LogonInfoV2(LogonInfoVersion2 {
+                    logon_info: logon_info(),
+                }),
+            ),
+            (InfoType::PlainNotify, InfoData::PlainNotify),
+        ] {
+            let frame = save_session_info_frame(IO_CHANNEL, info_type, info_data);
+            assert_eq!(
+                logon_outcome(IO_CHANNEL, Action::X224, &frame),
+                Some(LogonOutcome::Succeeded),
+                "{info_type:?}"
+            );
+        }
     }
 
     #[test]
