@@ -21,7 +21,11 @@ use ironrdp::pdu::rdp::headers::{
     StreamPriority,
 };
 use ironrdp::pdu::rdp::server_license::{LicensePdu, LicensingErrorMessage};
-use ironrdp::pdu::rdp::session_info::{InfoData, InfoType, SaveSessionInfoPdu};
+use ironrdp::pdu::rdp::session_info::{
+    InfoData, InfoType, LogonErrorNotificationData, LogonErrorNotificationDataErrorCode,
+    LogonErrorNotificationType, LogonErrorsInfo, LogonExFlags, LogonInfoExtended,
+    SaveSessionInfoPdu,
+};
 use ironrdp::pdu::rdp::ClientInfoPdu;
 use ironrdp::pdu::x224::{X224Data, X224};
 use ironrdp::pdu::{encode_vec, gcc, Encode};
@@ -46,10 +50,16 @@ const SHARE_ID: u32 = 0x0001_03ea;
 enum Stop {
     /// After the Attach User Request, before the client can send the Client Info PDU.
     BeforeClientInfo,
+    /// After the Attach User Confirm: the server reads whatever arrives until the client closes.
+    ReadAfterAttach,
     /// Right after the Client Info PDU arrived.
     AfterClientInfo,
+    /// Right after the Client Info PDU arrived, the server goes silent until the client closes.
+    StallAfterClientInfo,
     /// After the connection sequence finished, inside the logon window.
     AfterConnect,
+    /// After the connection sequence finished, the server stays silent until the client closes.
+    SilentAfterConnect,
     /// Never: the server confirms the login and keeps the connection open.
     Confirm,
 }
@@ -61,6 +71,34 @@ enum End {
     Close,
     /// TCP reset.
     Reset,
+}
+
+/// One connect against the mock server.
+#[derive(Clone, Debug)]
+struct Script {
+    stop: Stop,
+    end: End,
+    /// The client offers NLA; the server still selects TLS-only.
+    offer_nla: bool,
+    /// After the connection sequence, the server first sends SESSION_CONTINUE with
+    /// LOGON_FAILED_OTHER, as a WS2019 broker farm does on every good logon.
+    session_continue: bool,
+    alternate_shell: Option<String>,
+    /// A shorter logon window through `connect_within`; `None` runs the production `connect`.
+    logon_window: Option<Duration>,
+}
+
+impl Script {
+    fn new(stop: Stop, end: End) -> Self {
+        Self {
+            stop,
+            end,
+            offer_nla: false,
+            session_continue: false,
+            alternate_shell: None,
+            logon_window: None,
+        }
+    }
 }
 
 /// What `connect` returned, how long it took, and whether the server received the credentials.
@@ -79,17 +117,30 @@ impl Run {
     }
 }
 
-/// Connects with NLA offered or not; the server always selects TLS-only.
-async fn run(stop: Stop, end: End, offer_nla: bool) -> Run {
+/// Runs `script`; the server always selects TLS-only.
+async fn run(script: Script) -> Run {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let (stop, end, session_continue) = (script.stop, script.end, script.session_continue);
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        serve(stream, stop, end).await
+        serve(stream, stop, end, session_continue).await
     });
 
+    let mut config = test_config(script.alternate_shell.as_deref());
+    config.host = "127.0.0.1".to_string();
+    config.port = port;
+    config.enable_credssp = script.offer_nla;
     let started = Instant::now();
-    let result = connect(port, offer_nla).await;
+    let connect = async {
+        match script.logon_window {
+            Some(window) => RdpSession::connect_within(config, None, window).await,
+            None => RdpSession::connect(config, None).await,
+        }
+    };
+    let result = tokio::time::timeout(Duration::from_secs(30), connect)
+        .await
+        .expect("connect did not finish");
     let elapsed = started.elapsed();
     // Dropping the session closes the connection, which a confirming server waits for.
     let result = result.map(drop);
@@ -115,8 +166,8 @@ async fn connect(port: u16, enable_credssp: bool) -> Result<RdpSession, RdpError
 }
 
 /// Runs the server side of the connection sequence up to `stop`. Returns whether the Client Info
-/// PDU arrived.
-async fn serve(mut tcp: TcpStream, stop: Stop, end: End) -> bool {
+/// PDU arrived (for `ReadAfterAttach`: whether any byte arrived).
+async fn serve(mut tcp: TcpStream, stop: Stop, end: End, session_continue: bool) -> bool {
     read_frame(&mut tcp).await; // X.224 Connection Request
     write_frame(
         &mut tcp,
@@ -151,13 +202,23 @@ async fn serve(mut tcp: TcpStream, stop: Stop, end: End) -> bool {
         }),
     )
     .await;
+    if let Stop::ReadAfterAttach = stop {
+        return !read_until_closed(&mut tls).await.is_empty();
+    }
     let frame = read_frame(&mut tls).await;
     let request = ironrdp::pdu::decode::<X224<SendDataRequest<'_>>>(&frame).unwrap();
     let client_info = ironrdp::pdu::decode::<ClientInfoPdu>(&request.0.user_data).unwrap();
     assert_eq!(client_info.client_info.credentials.username, "user");
-    if let Stop::AfterClientInfo = stop {
-        finish(tls, end).await;
-        return true;
+    match stop {
+        Stop::AfterClientInfo => {
+            finish(tls, end).await;
+            return true;
+        }
+        Stop::StallAfterClientInfo => {
+            read_until_closed(&mut tls).await;
+            return true;
+        }
+        _ => {}
     }
 
     let license = LicensePdu::from(LicensingErrorMessage::new_valid_client().unwrap());
@@ -182,8 +243,30 @@ async fn serve(mut tcp: TcpStream, stop: Stop, end: End) -> bool {
     )
     .await;
 
+    if session_continue {
+        write_frame(
+            &mut tls,
+            &share_data(ShareDataPdu::SaveSessionInfo(SaveSessionInfoPdu {
+                info_type: InfoType::LogonExtended,
+                info_data: InfoData::LogonExtended(LogonInfoExtended {
+                    present_fields_flags: LogonExFlags::LOGON_ERRORS,
+                    auto_reconnect: None,
+                    errors_info: Some(LogonErrorsInfo {
+                        error_type: LogonErrorNotificationType::SessionContinue,
+                        error_data: LogonErrorNotificationData::ErrorCode(
+                            LogonErrorNotificationDataErrorCode::FailedOther,
+                        ),
+                    }),
+                }),
+            })),
+        )
+        .await;
+    }
     match stop {
         Stop::AfterConnect => finish(tls, end).await,
+        Stop::SilentAfterConnect => {
+            read_until_closed(&mut tls).await;
+        }
         Stop::Confirm => {
             write_frame(
                 &mut tls,
@@ -193,12 +276,21 @@ async fn serve(mut tcp: TcpStream, stop: Stop, end: End) -> bool {
                 })),
             )
             .await;
-            let mut sink = Vec::new();
-            let _ = tls.read_to_end(&mut sink).await;
+            read_until_closed(&mut tls).await;
         }
-        Stop::BeforeClientInfo | Stop::AfterClientInfo => unreachable!(),
+        Stop::BeforeClientInfo
+        | Stop::ReadAfterAttach
+        | Stop::AfterClientInfo
+        | Stop::StallAfterClientInfo => unreachable!(),
     }
     true
+}
+
+/// Reads until the client closes the connection, cleanly or not. Returns what arrived.
+async fn read_until_closed(tls: &mut TlsStream<TcpStream>) -> Vec<u8> {
+    let mut received = Vec::new();
+    let _ = tls.read_to_end(&mut received).await;
+    received
 }
 
 fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
@@ -314,7 +406,7 @@ fn assert_unconfirmed(run: &Run) {
 #[tokio::test]
 async fn a_close_before_the_credentials_is_a_connection_failure() {
     for end in [End::Close, End::Reset] {
-        let run = run(Stop::BeforeClientInfo, end, false).await;
+        let run = run(Script::new(Stop::BeforeClientInfo, end)).await;
         assert!(!run.credentials_received);
         assert!(
             matches!(run.error(), RdpError::ConnectionFailed(_)),
@@ -325,9 +417,25 @@ async fn a_close_before_the_credentials_is_a_connection_failure() {
 }
 
 #[tokio::test]
+async fn a_client_info_that_never_left_is_a_connection_failure() {
+    // Too long to encode, so the Client Info step fails before writing anything.
+    let run = run(Script {
+        alternate_shell: Some("x".repeat(40_000)),
+        ..Script::new(Stop::ReadAfterAttach, End::Close)
+    })
+    .await;
+    assert!(!run.credentials_received);
+    assert!(
+        matches!(run.error(), RdpError::ConnectionFailed(_)),
+        "got {:?}",
+        run.error()
+    );
+}
+
+#[tokio::test]
 async fn a_close_right_after_the_credentials_is_an_unconfirmed_login() {
     for end in [End::Close, End::Reset] {
-        let run = run(Stop::AfterClientInfo, end, false).await;
+        let run = run(Script::new(Stop::AfterClientInfo, end)).await;
         assert!(run.credentials_received);
         assert_unconfirmed(&run);
     }
@@ -336,30 +444,78 @@ async fn a_close_right_after_the_credentials_is_an_unconfirmed_login() {
 #[tokio::test]
 async fn the_server_selection_decides_not_the_client_offer() {
     // The client offers NLA and the server picks TLS-only, so the credentials go in Client Info.
-    let run = run(Stop::AfterClientInfo, End::Close, true).await;
+    let run = run(Script {
+        offer_nla: true,
+        ..Script::new(Stop::AfterClientInfo, End::Close)
+    })
+    .await;
     assert!(run.credentials_received);
     assert_unconfirmed(&run);
 }
 
 #[tokio::test]
+async fn a_stall_after_the_credentials_is_an_unconfirmed_login() {
+    let logon_window = Duration::from_secs(1);
+    let run = run(Script {
+        logon_window: Some(logon_window),
+        ..Script::new(Stop::StallAfterClientInfo, End::Close)
+    })
+    .await;
+    assert!(run.credentials_received);
+    assert_unconfirmed(&run);
+    assert!(run.elapsed >= logon_window, "took {:?}", run.elapsed);
+}
+
+#[tokio::test]
 async fn a_close_inside_the_logon_window_is_an_unconfirmed_login() {
-    for end in [End::Close, End::Reset] {
-        let run = run(Stop::AfterConnect, end, false).await;
-        assert!(run.credentials_received);
-        assert_unconfirmed(&run);
-        // The end decided the result, not the logon window running out.
-        assert!(
-            run.elapsed < LOGON_OUTCOME_WINDOW / 2,
-            "{end:?}: took {:?}",
-            run.elapsed
-        );
+    for session_continue in [false, true] {
+        for end in [End::Close, End::Reset] {
+            let run = run(Script {
+                session_continue,
+                ..Script::new(Stop::AfterConnect, end)
+            })
+            .await;
+            assert!(run.credentials_received);
+            assert_unconfirmed(&run);
+            // The end decided the result, not the logon window running out.
+            assert!(
+                run.elapsed < LOGON_OUTCOME_WINDOW / 2,
+                "{end:?}: took {:?}",
+                run.elapsed
+            );
+        }
     }
 }
 
 #[tokio::test]
+async fn session_continue_then_silence_is_an_unconfirmed_login_at_20_s() {
+    let run = run(Script {
+        session_continue: true,
+        ..Script::new(Stop::SilentAfterConnect, End::Close)
+    })
+    .await;
+    assert_unconfirmed(&run);
+    assert!(
+        run.elapsed >= Duration::from_secs(20) && run.elapsed < Duration::from_secs(25),
+        "took {:?}",
+        run.elapsed
+    );
+}
+
+#[tokio::test]
 async fn the_mock_server_completes_a_confirmed_login() {
-    let run = run(Stop::Confirm, End::Close, false).await;
-    assert!(run.result.is_ok(), "got {:?}", run.result.err());
+    for session_continue in [false, true] {
+        let run = run(Script {
+            session_continue,
+            ..Script::new(Stop::Confirm, End::Close)
+        })
+        .await;
+        assert!(
+            run.result.is_ok(),
+            "session_continue={session_continue}: got {:?}",
+            run.result.err()
+        );
+    }
 }
 
 #[tokio::test]

@@ -416,8 +416,14 @@ mod tests {
         for (error_type, error_data) in [
             // SESSION_CONTINUE is informational; a broker farm sends it with FAILED_OTHER.
             (Type::SessionContinue, Data::ErrorCode(Code::FailedOther)),
-            (Type::SessionContinue, Data::ErrorCode(Code::FailedBadPassword)),
-            (Type::SessionContinue, Data::ErrorCode(Code::FailedUpdatePassword)),
+            (
+                Type::SessionContinue,
+                Data::ErrorCode(Code::FailedBadPassword),
+            ),
+            (
+                Type::SessionContinue,
+                Data::ErrorCode(Code::FailedUpdatePassword),
+            ),
             (Type::SessionContinue, Data::ErrorCode(Code::Warning)),
             (Type::SessionContinue, Data::SessionId(7)),
             (Type::SessionTerminate, Data::ErrorCode(Code::Warning)),

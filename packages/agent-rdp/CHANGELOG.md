@@ -1,13 +1,23 @@
 # Changelog
 
-## 0.8.0 (2026-10-09)
+## 0.8.0 (2026-10-10)
 
 
 ### Behavior Changes
 
-* On NLA-off hosts, `connect` fails closed when Windows does not confirm the logon within 20 s: it ends the session and returns `authentication_failed` with the new reason `logon_unconfirmed`. Previously it returned connected with the login outcome unknown. NLA-on connects are unchanged.
-* On NLA-off hosts, a connection that ends after the credentials were sent and before Windows confirms the logon (server close, TCP reset, TLS close) also returns `authentication_failed` / `logon_unconfirmed`, since the server may have counted a login attempt. Previously it returned `connection_failed`, which callers may retry. Failures before the credentials are sent stay `connection_failed`.
+* When the server selects TLS-only security (no CredSSP), `connect` fails closed unless Windows confirms the logon within 20 s of the credentials being sent: it ends the session and returns `authentication_failed` with the new reason `logon_unconfirmed`. Previously it returned connected with the login outcome unknown. Connects where the server selects CredSSP are unchanged.
+* In that mode, a connection that ends after the credentials were sent and before Windows confirms the logon (server close, TCP reset, TLS close, a stalled connection sequence) also returns `authentication_failed` / `logon_unconfirmed`, since the server may have counted a login attempt. Previously it returned `connection_failed`, which callers may retry. Failures before the credentials are sent stay `connection_failed`.
+* A logon error notice of type `SESSION_CONTINUE` no longer fails the login, whatever its error code. It is informational: an RD Connection Broker farm sends it with `LOGON_FAILED_OTHER` on every good logon, which 0.7.x reported as `authentication_failed`.
 * SDK: `AuthFailureReason` gains the member `"logon_unconfirmed"`. TypeScript code with an exhaustive `switch` over it needs a new case.
+
+## 0.7.2 (2026-10-08)
+
+
+### Bug Fixes
+
+* Wait for the logon whenever the server skips CredSSP, not only when `--no-nla` is set.
+* The SDK stream URL points at 127.0.0.1, matching the stream server's bind address.
+* Redirected drives answer every directory information class Windows asks for, skip symlinks, and report directory sizes as 0.
 
 ## [0.6.5](https://github.com/thisnick/agent-rdp/compare/agent-rdp-v0.6.4...agent-rdp-v0.6.5) (2026-02-26)
 
