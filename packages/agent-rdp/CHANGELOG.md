@@ -1,11 +1,12 @@
 # Changelog
 
-## 0.7.3 (2026-10-09)
+## 0.8.0 (2026-10-09)
 
 
 ### Behavior Changes
 
 * On NLA-off hosts, `connect` fails closed when Windows does not confirm the logon within 20 s: it ends the session and returns `authentication_failed` with the new reason `logon_unconfirmed`. Previously it returned connected with the login outcome unknown. NLA-on connects are unchanged.
+* On NLA-off hosts, a connection that ends after the credentials were sent and before Windows confirms the logon (server close, TCP reset, TLS close) also returns `authentication_failed` / `logon_unconfirmed`, since the server may have counted a login attempt. Previously it returned `connection_failed`, which callers may retry. Failures before the credentials are sent stay `connection_failed`.
 * SDK: `AuthFailureReason` gains the member `"logon_unconfirmed"`. TypeScript code with an exhaustive `switch` over it needs a new case.
 
 ## [0.6.5](https://github.com/thisnick/agent-rdp/compare/agent-rdp-v0.6.4...agent-rdp-v0.6.5) (2026-02-26)

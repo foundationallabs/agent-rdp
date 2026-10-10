@@ -273,7 +273,8 @@ pub struct ErrorInfo {
 ///
 /// CredSSP (NLA) failures carry the NTSTATUS the server returned; NLA-off failures carry the
 /// Save Session Info logon error (MS-RDPBCGR 2.2.10.1.1.4.1.1), or `logon_unconfirmed` when the
-/// server never confirmed the login.
+/// server never confirmed the login (NLA off: silence, or the connection ended after the
+/// credentials were sent).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export, export_to = "../../../packages/agent-rdp/src/generated/")]
 #[serde(rename_all = "snake_case")]
@@ -315,8 +316,9 @@ pub enum AuthFailureReason {
     /// NLA off: LOGON_MSG_NO_PERMISSION.
     NoPermission,
     /// NLA off: no logon notification (Logon Info or Plain Notify) arrived within the logon
-    /// window, so the login is treated as failed. Windows sends none for a wrong password on some
-    /// hosts.
+    /// window, or the connection ended after the credentials were sent and before one arrived, so
+    /// the login is treated as failed. Windows sends none for a wrong password on some hosts, and
+    /// the server may have counted the attempt.
     LogonUnconfirmed,
 }
 

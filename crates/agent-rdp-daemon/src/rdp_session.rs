@@ -13,12 +13,14 @@ use tracing::{debug, error, info, warn};
 
 use agent_rdp_protocol::{AuthFailureReason, DriveMapping};
 use ironrdp::connector::{
-    self, ClientConnector, ConnectorError, ConnectorResult, Credentials, ServerName,
+    self, ClientConnector, ClientConnectorState, ConnectionResult, ConnectorError, ConnectorResult,
+    Credentials, ServerName,
 };
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp::pdu::rdp::client_info::PerformanceFlags;
+use ironrdp::pdu::WriteBuf;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageOutput};
 use ironrdp_dvc::DrdynvcClient;
@@ -33,6 +35,8 @@ use ironrdp_tokio::{FramedWrite, TokioFramed};
 use tokio::net::TcpStream;
 
 pub mod clipboard;
+#[cfg(test)]
+mod mock_server;
 
 #[derive(Error, Debug)]
 pub enum RdpError {
@@ -93,8 +97,47 @@ fn awaits_logon(connector: &ClientConnector) -> bool {
     !connector.should_perform_credssp()
 }
 
-/// The NLA-off login result: success only when the server confirmed the login. Silence fails
-/// closed, because on some hosts Windows sends nothing for a wrong password.
+/// `connect_finalize` for a server that selected TLS-only security. The credentials travel in
+/// the Client Info PDU, and the server may check them as soon as it arrives, so an end after it
+/// was sent fails the login closed (see [`finalize_error`]).
+async fn finalize_without_nla(
+    mut connector: ClientConnector,
+    framed: &mut TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>,
+) -> Result<ConnectionResult, RdpError> {
+    let mut buf = WriteBuf::new();
+    let mut credentials_sent = false;
+    loop {
+        let sends_client_info = matches!(
+            connector.state,
+            ClientConnectorState::SecureSettingsExchange { .. }
+        );
+        if let Err(error) =
+            ironrdp_tokio::single_sequence_step(framed, &mut connector, &mut buf).await
+        {
+            return Err(finalize_error(error, credentials_sent));
+        }
+        credentials_sent |= sends_client_info;
+        if let ClientConnectorState::Connected { result } = connector.state {
+            return Ok(result);
+        }
+    }
+}
+
+/// Once the credentials are out, a failure is not a connection failure the caller may retry:
+/// the server may have counted a login attempt.
+fn finalize_error(error: ConnectorError, credentials_sent: bool) -> RdpError {
+    match RdpError::from(error) {
+        RdpError::ConnectionFailed(message) if credentials_sent => {
+            warn!(%message, "Connection ended after the credentials were sent; ending the login unconfirmed");
+            RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed)
+        }
+        other => other,
+    }
+}
+
+/// The NLA-off login result: success only when the server confirmed the login. Silence and a
+/// session end both fail closed: on some hosts Windows sends nothing for a wrong password, and
+/// the server may have counted the attempt before the session ended.
 fn logon_verdict(report: Option<LogonReport>) -> Result<(), RdpError> {
     match report {
         Some(LogonReport::Outcome(LogonOutcome::Succeeded)) => {
@@ -104,9 +147,12 @@ fn logon_verdict(report: Option<LogonReport>) -> Result<(), RdpError> {
         Some(LogonReport::Outcome(LogonOutcome::Failed(reason))) => {
             Err(RdpError::AuthenticationFailed(reason))
         }
-        Some(LogonReport::SessionEnded) => Err(RdpError::ConnectionFailed(
-            "Connection closed before the login completed".to_string(),
-        )),
+        Some(LogonReport::SessionEnded) => {
+            warn!("Session ended before the server confirmed the login");
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonUnconfirmed,
+            ))
+        }
         None => {
             warn!(
                 "No login confirmation from the server within {:?}; ending the session",
@@ -345,16 +391,20 @@ impl RdpSession {
         let server_name: ServerName = config.host.clone().into();
 
         // Finalize connection (post-TLS)
-        let connection_result = ironrdp_tokio::connect_finalize(
-            upgraded,
-            connector,
-            &mut upgraded_framed,
-            &mut network_client,
-            server_name,
-            server_public_key,
-            None, // No Kerberos
-        )
-        .await?;
+        let connection_result = if await_logon {
+            finalize_without_nla(connector, &mut upgraded_framed).await?
+        } else {
+            ironrdp_tokio::connect_finalize(
+                upgraded,
+                connector,
+                &mut upgraded_framed,
+                &mut network_client,
+                server_name,
+                server_public_key,
+                None, // No Kerberos
+            )
+            .await?
+        };
 
         info!("RDP connection established to {}", config.host);
 
@@ -1009,7 +1059,7 @@ mod tests {
         assert!(matches!(tls_upgrade_error(reset), RdpError::TlsError(_)));
     }
 
-    fn test_config(alternate_shell: Option<&str>) -> RdpConfig {
+    pub(super) fn test_config(alternate_shell: Option<&str>) -> RdpConfig {
         RdpConfig {
             host: "host".to_string(),
             port: 3389,
@@ -1059,7 +1109,34 @@ mod tests {
         ));
         assert!(matches!(
             logon_verdict(Some(LogonReport::SessionEnded)),
-            Err(RdpError::ConnectionFailed(_))
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonUnconfirmed
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_connection_error_after_the_credentials_is_an_unconfirmed_login() {
+        let closed = || ConnectorError::new("read frame", ConnectorErrorKind::General);
+        assert!(matches!(
+            finalize_error(closed(), false),
+            RdpError::ConnectionFailed(_)
+        ));
+        assert!(matches!(
+            finalize_error(closed(), true),
+            RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed)
+        ));
+        let refused = ConnectorError::new(
+            "CredSSP",
+            ConnectorErrorKind::Credssp(sspi::Error::new_with_nstatus(
+                sspi::ErrorKind::InvalidToken,
+                "CredSSP server returned an error status",
+                NStatusCode::WRONG_PASSWORD,
+            )),
+        );
+        assert!(matches!(
+            finalize_error(refused, true),
+            RdpError::AuthenticationFailed(AuthFailureReason::WrongPassword)
         ));
     }
 
