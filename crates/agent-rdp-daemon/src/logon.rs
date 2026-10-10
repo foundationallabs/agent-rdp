@@ -93,7 +93,7 @@ pub fn logon_outcome(io_channel_id: u16, action: Action, frame: &[u8]) -> Option
                 return None;
             };
             if let LogonErrorNotificationType::SessionContinue = errors.error_type {
-                // The data field is the session ID; IronRDP decodes IDs 0-3 as LOGON_FAILED_* codes.
+                // The data field is the session ID; IronRDP decodes IDs 0-3 as logon error codes.
                 info!(
                     session_id = errors.error_data.to_u32(),
                     "Server sent SESSION_CONTINUE; the logon goes on"
@@ -113,8 +113,8 @@ pub fn logon_outcome(io_channel_id: u16, action: Action, frame: &[u8]) -> Option
 /// Map a Logon Errors Info structure to a login failure.
 ///
 /// SESSION_CONTINUE is informational: Windows sends it on good logons (the lab broker farm and
-/// psm02 both do) with the session ID as its data. The data field holds a LOGON_FAILED_* code only
-/// alongside SESSION_TERMINATE; with the other types it is a session ID that can collide with
+/// psm02 both do) with the session ID as its data. The data field is read as a LOGON_FAILED_* code
+/// only alongside SESSION_TERMINATE; with the other types it is a session ID that can collide with
 /// those codes, so it is not read there.
 fn logon_error_reason(errors: &LogonErrorsInfo) -> Option<AuthFailureReason> {
     use LogonErrorNotificationDataErrorCode as Code;
@@ -425,7 +425,7 @@ mod tests {
         use LogonErrorNotificationType as Type;
         for (error_type, error_data) in [
             // SESSION_CONTINUE is informational; its data is the session ID, which IronRDP decodes
-            // as a FAILED_* code for IDs 0-3 (the lab farm's session 2 reads as FAILED_OTHER).
+            // as a logon error code for IDs 0-3 (the lab farm's session 2 reads as FAILED_OTHER).
             (Type::SessionContinue, Data::ErrorCode(Code::FailedOther)),
             (
                 Type::SessionContinue,
