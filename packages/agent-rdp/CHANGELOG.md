@@ -7,7 +7,7 @@
 
 * When the server selects TLS-only security (no CredSSP), `connect` fails closed unless Windows confirms the logon within 20 s of the credentials being sent: it ends the session and returns `authentication_failed` with the new reason `logon_unconfirmed`. Previously it returned connected with the login outcome unknown. Connects where the server selects CredSSP are unchanged.
 * In that mode, a connection that ends after the credentials were sent and before Windows confirms the logon (server close, TCP reset, TLS close, a stalled connection sequence) also returns `authentication_failed` / `logon_unconfirmed`, since the server may have counted a login attempt. Previously it returned `connection_failed`, which callers may retry. Failures before the credentials are sent stay `connection_failed`.
-* A logon error notice of type `SESSION_CONTINUE` no longer fails the login, whatever its error code. It is informational: an RD Connection Broker farm sends it with `LOGON_FAILED_OTHER` on every good logon, which 0.7.x reported as `authentication_failed`.
+* A `SESSION_CONTINUE` logon notice no longer fails the login. Windows sends it during good logons with the session ID in its data field, which IronRDP decodes as a `LOGON_FAILED_*` code for IDs 0-3, so 0.7.x reported a good logon to session 1 or 2 as `authentication_failed`. The daemon now logs that field as `session_id`.
 * SDK: `AuthFailureReason` gains the member `"logon_unconfirmed"`. TypeScript code with an exhaustive `switch` over it needs a new case.
 
 ## 0.7.2 (2026-10-08)

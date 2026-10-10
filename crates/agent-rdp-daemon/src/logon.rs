@@ -92,11 +92,19 @@ pub fn logon_outcome(io_channel_id: u16, action: Action, frame: &[u8]) -> Option
                 );
                 return None;
             };
-            info!(
-                error_type = ?errors.error_type,
-                error_data = ?errors.error_data,
-                "Server sent logon errors info"
-            );
+            if let LogonErrorNotificationType::SessionContinue = errors.error_type {
+                // The data field is the session ID; IronRDP decodes IDs 0-3 as LOGON_FAILED_* codes.
+                info!(
+                    session_id = errors.error_data.to_u32(),
+                    "Server sent SESSION_CONTINUE; the logon goes on"
+                );
+            } else {
+                info!(
+                    error_type = ?errors.error_type,
+                    error_data = ?errors.error_data,
+                    "Server sent logon errors info"
+                );
+            }
             logon_error_reason(&errors).map(LogonOutcome::Failed)
         }
     }
@@ -104,11 +112,10 @@ pub fn logon_outcome(io_channel_id: u16, action: Action, frame: &[u8]) -> Option
 
 /// Map a Logon Errors Info structure to a login failure.
 ///
-/// SESSION_CONTINUE is informational whatever its data: the logon goes on, and a WS2019 broker
-/// farm sends it with LOGON_FAILED_OTHER on every good logon. The data field holds a
-/// LOGON_FAILED_* code only alongside SESSION_CONTINUE or SESSION_TERMINATE; with the
-/// session-choice types it is a session ID that can collide with those codes, so it is not read
-/// there.
+/// SESSION_CONTINUE is informational: Windows sends it on good logons (the lab broker farm and
+/// psm02 both do) with the session ID as its data. The data field holds a LOGON_FAILED_* code only
+/// alongside SESSION_TERMINATE; with the other types it is a session ID that can collide with
+/// those codes, so it is not read there.
 fn logon_error_reason(errors: &LogonErrorsInfo) -> Option<AuthFailureReason> {
     use LogonErrorNotificationDataErrorCode as Code;
     use LogonErrorNotificationType as Type;
@@ -417,7 +424,8 @@ mod tests {
         use LogonErrorNotificationDataErrorCode as Code;
         use LogonErrorNotificationType as Type;
         for (error_type, error_data) in [
-            // SESSION_CONTINUE is informational; a broker farm sends it with FAILED_OTHER.
+            // SESSION_CONTINUE is informational; its data is the session ID, which IronRDP decodes
+            // as a FAILED_* code for IDs 0-3 (the lab farm's session 2 reads as FAILED_OTHER).
             (Type::SessionContinue, Data::ErrorCode(Code::FailedOther)),
             (
                 Type::SessionContinue,

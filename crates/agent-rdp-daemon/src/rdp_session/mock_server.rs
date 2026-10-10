@@ -73,8 +73,8 @@ enum End {
     Reset,
 }
 
-/// Where the server sends a SESSION_CONTINUE notice with LOGON_FAILED_OTHER, as a WS2019 broker
-/// farm does on every good logon.
+/// Where the server sends a SESSION_CONTINUE notice for session 2, which IronRDP decodes as
+/// LOGON_FAILED_OTHER, as the lab broker farm does on a good logon.
 #[derive(Clone, Copy, Debug)]
 enum SessionContinue {
     Never,
