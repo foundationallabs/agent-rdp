@@ -79,7 +79,8 @@ impl Run {
     }
 }
 
-async fn run(stop: Stop, end: End) -> Run {
+/// Connects with NLA offered or not; the server always selects TLS-only.
+async fn run(stop: Stop, end: End, offer_nla: bool) -> Run {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -87,14 +88,8 @@ async fn run(stop: Stop, end: End) -> Run {
         serve(stream, stop, end).await
     });
 
-    let mut config = test_config(None);
-    config.host = "127.0.0.1".to_string();
-    config.port = port;
-    config.enable_credssp = false;
     let started = Instant::now();
-    let result = tokio::time::timeout(Duration::from_secs(30), RdpSession::connect(config, None))
-        .await
-        .expect("connect did not finish");
+    let result = connect(port, offer_nla).await;
     let elapsed = started.elapsed();
     // Dropping the session closes the connection, which a confirming server waits for.
     let result = result.map(drop);
@@ -107,6 +102,16 @@ async fn run(stop: Stop, end: End) -> Run {
         elapsed,
         credentials_received,
     }
+}
+
+async fn connect(port: u16, enable_credssp: bool) -> Result<RdpSession, RdpError> {
+    let mut config = test_config(None);
+    config.host = "127.0.0.1".to_string();
+    config.port = port;
+    config.enable_credssp = enable_credssp;
+    tokio::time::timeout(Duration::from_secs(30), RdpSession::connect(config, None))
+        .await
+        .expect("connect did not finish")
 }
 
 /// Runs the server side of the connection sequence up to `stop`. Returns whether the Client Info
@@ -309,7 +314,7 @@ fn assert_unconfirmed(run: &Run) {
 #[tokio::test]
 async fn a_close_before_the_credentials_is_a_connection_failure() {
     for end in [End::Close, End::Reset] {
-        let run = run(Stop::BeforeClientInfo, end).await;
+        let run = run(Stop::BeforeClientInfo, end, false).await;
         assert!(!run.credentials_received);
         assert!(
             matches!(run.error(), RdpError::ConnectionFailed(_)),
@@ -322,16 +327,24 @@ async fn a_close_before_the_credentials_is_a_connection_failure() {
 #[tokio::test]
 async fn a_close_right_after_the_credentials_is_an_unconfirmed_login() {
     for end in [End::Close, End::Reset] {
-        let run = run(Stop::AfterClientInfo, end).await;
+        let run = run(Stop::AfterClientInfo, end, false).await;
         assert!(run.credentials_received);
         assert_unconfirmed(&run);
     }
 }
 
 #[tokio::test]
+async fn the_server_selection_decides_not_the_client_offer() {
+    // The client offers NLA and the server picks TLS-only, so the credentials go in Client Info.
+    let run = run(Stop::AfterClientInfo, End::Close, true).await;
+    assert!(run.credentials_received);
+    assert_unconfirmed(&run);
+}
+
+#[tokio::test]
 async fn a_close_inside_the_logon_window_is_an_unconfirmed_login() {
     for end in [End::Close, End::Reset] {
-        let run = run(Stop::AfterConnect, end).await;
+        let run = run(Stop::AfterConnect, end, false).await;
         assert!(run.credentials_received);
         assert_unconfirmed(&run);
         // The end decided the result, not the logon window running out.
@@ -345,6 +358,42 @@ async fn a_close_inside_the_logon_window_is_an_unconfirmed_login() {
 
 #[tokio::test]
 async fn the_mock_server_completes_a_confirmed_login() {
-    let run = run(Stop::Confirm, End::Close).await;
+    let run = run(Stop::Confirm, End::Close, false).await;
     assert!(run.result.is_ok(), "got {:?}", run.result.err());
+}
+
+#[tokio::test]
+async fn nla_on_still_runs_credssp_first() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut tcp, _) = listener.accept().await.unwrap();
+        read_frame(&mut tcp).await; // X.224 Connection Request
+        write_frame(
+            &mut tcp,
+            &X224(ConnectionConfirm::Response {
+                flags: ResponseFlags::empty(),
+                protocol: SecurityProtocol::HYBRID,
+            }),
+        )
+        .await;
+        let mut tls = tls_acceptor().accept(tcp).await.unwrap();
+        let mut first = [0u8; 1];
+        tls.read_exact(&mut first).await.unwrap();
+        finish(tls, End::Reset).await;
+        first[0]
+    });
+
+    let result = connect(port, true).await;
+    // A CredSSP TSRequest is a DER SEQUENCE; an MCS Connect Initial would start a TPKT frame (3).
+    assert_eq!(server.await.unwrap(), 0x30);
+    assert!(
+        !matches!(
+            result,
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonUnconfirmed
+            ))
+        ),
+        "an NLA-on end is never an unconfirmed login"
+    );
 }
