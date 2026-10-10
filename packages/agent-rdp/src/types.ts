@@ -203,7 +203,7 @@ export class RdpError extends Error {
   constructor(
     public code: ErrorCode,
     message: string,
-    /** Why the login was refused, when the server said. Only set with `authentication_failed`. */
+    /** Why the login failed, when known. Only set with `authentication_failed`. */
     public reason?: AuthFailureReason,
   ) {
     super(message);

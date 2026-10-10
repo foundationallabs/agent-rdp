@@ -171,8 +171,7 @@ impl LogonWatch {
     }
 }
 
-/// Wait up to `window` for the frame processor's report. `None` means the outcome is unknown:
-/// the server stayed silent and the session carries on.
+/// Wait up to `window` for the frame processor's report. `None` means the server stayed silent.
 pub async fn await_logon_report(
     mut report_rx: oneshot::Receiver<LogonReport>,
     window: Duration,
@@ -549,7 +548,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_silent_server_leaves_the_outcome_unknown() {
+    async fn a_silent_server_sends_no_report() {
         let (tx, rx) = oneshot::channel::<LogonReport>();
         assert_eq!(
             await_logon_report(rx, Duration::from_millis(20)).await,

@@ -184,7 +184,7 @@ agent-rdp connect --host psm.example.com -u user -p secret \
   --alternate-shell 'psm /u user@domain /a target /c PSM-RDP'
 ```
 
-The value can also come from the `AGENT_RDP_ALTERNATE_SHELL` environment variable. PSM deployments that require NLA to be off (TLS security only) can add `--no-nla` (SDK: `enableNla: false`).
+The value can also come from the `AGENT_RDP_ALTERNATE_SHELL` environment variable. PSM deployments that require NLA to be off (TLS security only) can add `--no-nla` (SDK: `enableNla: false`). With NLA off, Windows checks the password inside the session, so `connect` waits up to 20 s for the server to confirm the login and fails with `authentication_failed` (reason `logon_unconfirmed`) if it does not.
 
 ### UI Automation
 

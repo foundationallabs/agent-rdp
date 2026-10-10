@@ -81,9 +81,43 @@ fn tls_upgrade_error(error: std::io::Error) -> RdpError {
     }
 }
 
-/// How long an NLA-off `connect()` waits for the server to report the login result. Short of
-/// the SDK's 30 s default request timeout, so the connect response still reaches the caller.
+/// How long an NLA-off `connect()` waits for the server to report the login result before it
+/// fails closed. Short of the SDK's 30 s default request timeout, so the connect response still
+/// reaches the caller.
 const LOGON_OUTCOME_WINDOW: Duration = Duration::from_secs(20);
+
+/// Whether `connect()` must wait for the server to confirm the login. Without CredSSP the server
+/// checks the password only after the connection is up. Reads what the server selected: it can
+/// pick TLS-only even when the client offered NLA.
+fn awaits_logon(connector: &ClientConnector) -> bool {
+    !connector.should_perform_credssp()
+}
+
+/// The NLA-off login result: success only when the server confirmed the login. Silence fails
+/// closed, because on some hosts Windows sends nothing for a wrong password.
+fn logon_verdict(report: Option<LogonReport>) -> Result<(), RdpError> {
+    match report {
+        Some(LogonReport::Outcome(LogonOutcome::Succeeded)) => {
+            info!("Server confirmed the login");
+            Ok(())
+        }
+        Some(LogonReport::Outcome(LogonOutcome::Failed(reason))) => {
+            Err(RdpError::AuthenticationFailed(reason))
+        }
+        Some(LogonReport::SessionEnded) => Err(RdpError::ConnectionFailed(
+            "Connection closed before the login completed".to_string(),
+        )),
+        None => {
+            warn!(
+                "No login confirmation from the server within {:?}; ending the session",
+                LOGON_OUTCOME_WINDOW
+            );
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonUnconfirmed,
+            ))
+        }
+    }
+}
 
 /// Configuration for an RDP connection.
 pub struct RdpConfig {
@@ -295,9 +329,7 @@ impl RdpSession {
 
         // Mark upgrade as done
         let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
-        // Without CredSSP the server checks the password only after the connection is up. Read
-        // what the server selected: it can pick TLS-only even when the client offered NLA.
-        let await_logon = !connector.should_perform_credssp();
+        let await_logon = awaits_logon(&connector);
 
         // Create framed transport for upgraded connection
         let mut upgraded_framed: TokioFramed<tokio_rustls::client::TlsStream<TcpStream>> =
@@ -374,22 +406,12 @@ impl RdpSession {
         });
 
         if let Some(logon_rx) = logon_rx {
-            match logon::await_logon_report(logon_rx, LOGON_OUTCOME_WINDOW).await {
-                Some(LogonReport::Outcome(LogonOutcome::Failed(reason))) => {
-                    return Err(RdpError::AuthenticationFailed(reason));
-                }
-                Some(LogonReport::Outcome(LogonOutcome::Succeeded)) => {
-                    info!("Server confirmed the login");
-                }
-                Some(LogonReport::SessionEnded) => {
-                    return Err(RdpError::ConnectionFailed(
-                        "Connection closed before the login completed".to_string(),
-                    ));
-                }
-                None => warn!(
-                    "No login result from the server within {:?}; continuing with the outcome unknown",
-                    LOGON_OUTCOME_WINDOW
-                ),
+            let report = logon::await_logon_report(logon_rx, LOGON_OUTCOME_WINDOW).await;
+            if let Err(error) = logon_verdict(report) {
+                // Leave no session sitting at the Windows logon screen. A graceful shutdown does
+                // not report a drop to the daemon, and is a no-op when the session already ended.
+                let _ = command_tx.send(SessionCommand::Shutdown).await;
+                return Err(error);
             }
         }
 
@@ -949,7 +971,10 @@ fn create_key_event(scancode: u8, extended: bool, release: bool) -> FastPathInpu
 #[cfg(test)]
 mod tests {
     use ironrdp::connector::sspi::{self, credssp::NStatusCode};
-    use ironrdp::connector::ConnectorErrorKind;
+    use ironrdp::connector::{ConnectorErrorKind, Sequence};
+    use ironrdp::pdu::nego::{ConnectionConfirm, ResponseFlags, SecurityProtocol};
+    use ironrdp::pdu::x224::X224;
+    use ironrdp::pdu::WriteBuf;
 
     use super::*;
 
@@ -1018,6 +1043,69 @@ mod tests {
         let connector = build_connector_config(&config);
         assert!(!connector.enable_credssp);
         assert!(connector.enable_tls);
+    }
+
+    #[test]
+    fn only_a_confirmed_login_succeeds() {
+        assert!(logon_verdict(Some(LogonReport::Outcome(LogonOutcome::Succeeded))).is_ok());
+        assert!(matches!(
+            logon_verdict(Some(LogonReport::Outcome(LogonOutcome::Failed(
+                AuthFailureReason::LogonFailedBadPassword
+            )))),
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonFailedBadPassword
+            ))
+        ));
+        assert!(matches!(
+            logon_verdict(Some(LogonReport::SessionEnded)),
+            Err(RdpError::ConnectionFailed(_))
+        ));
+    }
+
+    #[test]
+    fn a_silent_server_fails_the_login_closed() {
+        assert!(matches!(
+            logon_verdict(None),
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonUnconfirmed
+            ))
+        ));
+    }
+
+    /// Drive a connector through negotiation to the point where `connect()` decides whether to
+    /// wait for the login, with the server selecting `selected`.
+    fn negotiated_connector(enable_credssp: bool, selected: SecurityProtocol) -> ClientConnector {
+        let mut config = test_config(None);
+        config.enable_credssp = enable_credssp;
+        let mut connector = ClientConnector::new(
+            build_connector_config(&config),
+            "127.0.0.1:50000".parse().unwrap(),
+        );
+        let mut output = WriteBuf::new();
+        connector.step(&[], &mut output).unwrap();
+        let confirm = ironrdp::pdu::encode_vec(&X224(ConnectionConfirm::Response {
+            flags: ResponseFlags::empty(),
+            protocol: selected,
+        }))
+        .unwrap();
+        connector.step(&confirm, &mut output).unwrap();
+        connector.mark_security_upgrade_as_done();
+        connector
+    }
+
+    #[test]
+    fn nla_on_does_not_wait_for_the_login() {
+        let connector = negotiated_connector(true, SecurityProtocol::HYBRID);
+        assert!(!awaits_logon(&connector));
+    }
+
+    #[test]
+    fn tls_only_waits_for_the_login() {
+        let tls_offered = negotiated_connector(false, SecurityProtocol::SSL);
+        assert!(awaits_logon(&tls_offered));
+        // The server can pick TLS-only even when the client offered NLA.
+        let nla_offered = negotiated_connector(true, SecurityProtocol::SSL);
+        assert!(awaits_logon(&nla_offered));
     }
 
     #[test]

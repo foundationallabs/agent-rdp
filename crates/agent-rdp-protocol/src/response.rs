@@ -263,16 +263,17 @@ pub struct ErrorInfo {
     pub code: ErrorCode,
     /// Human-readable error message.
     pub message: String,
-    /// Why the login was refused, when the server said. Only set with `authentication_failed`.
+    /// Why the login failed, when known. Only set with `authentication_failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub reason: Option<AuthFailureReason>,
 }
 
-/// Why the server refused a login.
+/// Why a login failed.
 ///
 /// CredSSP (NLA) failures carry the NTSTATUS the server returned; NLA-off failures carry the
-/// Save Session Info logon error (MS-RDPBCGR 2.2.10.1.1.4.1.1).
+/// Save Session Info logon error (MS-RDPBCGR 2.2.10.1.1.4.1.1), or `LogonUnconfirmed` when the
+/// server never confirmed the login.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export, export_to = "../../../packages/agent-rdp/src/generated/")]
 #[serde(rename_all = "snake_case")]
@@ -313,6 +314,10 @@ pub enum AuthFailureReason {
     LogonFailedOther,
     /// NLA off: LOGON_MSG_NO_PERMISSION.
     NoPermission,
+    /// NLA off: no logon notification (Logon Info or Plain Notify) arrived within the logon
+    /// window, so the login is treated as failed. Windows sends none for a wrong password on some
+    /// hosts.
+    LogonUnconfirmed,
 }
 
 /// Error codes for structured error handling.
@@ -438,6 +443,13 @@ mod tests {
 
         let back: Response = serde_json::from_value(json).unwrap();
         assert_eq!(back.error.unwrap().reason, Some(AuthFailureReason::AccountLockedOut));
+    }
+
+    #[test]
+    fn logon_unconfirmed_wire_name() {
+        let resp = Response::authentication_failed(Some(AuthFailureReason::LogonUnconfirmed), "x");
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["error"]["reason"], "logon_unconfirmed");
     }
 
     #[test]
