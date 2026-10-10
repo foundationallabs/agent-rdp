@@ -83,6 +83,8 @@ struct Script {
     /// After the connection sequence, the server first sends SESSION_CONTINUE with
     /// LOGON_FAILED_OTHER, as a WS2019 broker farm does on every good logon.
     session_continue: bool,
+    /// How long the server waits after the Client Info PDU before it answers.
+    license_delay: Duration,
     alternate_shell: Option<String>,
     /// A shorter logon window through `connect_within`; `None` runs the production `connect`.
     logon_window: Option<Duration>,
@@ -95,6 +97,7 @@ impl Script {
             end,
             offer_nla: false,
             session_continue: false,
+            license_delay: Duration::ZERO,
             alternate_shell: None,
             logon_window: None,
         }
@@ -121,10 +124,12 @@ impl Run {
 async fn run(script: Script) -> Run {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (stop, end, session_continue) = (script.stop, script.end, script.session_continue);
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        serve(stream, stop, end, session_continue).await
+    let server = tokio::spawn({
+        let script = script.clone();
+        async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve(stream, script).await
+        }
     });
 
     let mut config = test_config(script.alternate_shell.as_deref());
@@ -167,7 +172,8 @@ async fn connect(port: u16, enable_credssp: bool) -> Result<RdpSession, RdpError
 
 /// Runs the server side of the connection sequence up to `stop`. Returns whether the Client Info
 /// PDU arrived (for `ReadAfterAttach`: whether any byte arrived).
-async fn serve(mut tcp: TcpStream, stop: Stop, end: End, session_continue: bool) -> bool {
+async fn serve(mut tcp: TcpStream, script: Script) -> bool {
+    let Script { stop, end, .. } = script;
     read_frame(&mut tcp).await; // X.224 Connection Request
     write_frame(
         &mut tcp,
@@ -221,6 +227,7 @@ async fn serve(mut tcp: TcpStream, stop: Stop, end: End, session_continue: bool)
         _ => {}
     }
 
+    tokio::time::sleep(script.license_delay).await;
     let license = LicensePdu::from(LicensingErrorMessage::new_valid_client().unwrap());
     write_frame(&mut tls, &indication(encode_vec(&license).unwrap())).await;
     write_frame(
@@ -243,7 +250,7 @@ async fn serve(mut tcp: TcpStream, stop: Stop, end: End, session_continue: bool)
     )
     .await;
 
-    if session_continue {
+    if script.session_continue {
         write_frame(
             &mut tls,
             &share_data(ShareDataPdu::SaveSessionInfo(SaveSessionInfoPdu {
@@ -464,6 +471,25 @@ async fn a_stall_after_the_credentials_is_an_unconfirmed_login() {
     assert!(run.credentials_received);
     assert_unconfirmed(&run);
     assert!(run.elapsed >= logon_window, "took {:?}", run.elapsed);
+}
+
+#[tokio::test]
+async fn the_logon_window_counts_from_the_credentials_not_the_connect() {
+    let logon_window = Duration::from_secs(2);
+    let license_delay = Duration::from_millis(1200);
+    let run = run(Script {
+        logon_window: Some(logon_window),
+        license_delay,
+        ..Script::new(Stop::SilentAfterConnect, End::Close)
+    })
+    .await;
+    assert_unconfirmed(&run);
+    // A window restarted at the end of the connection sequence would run to 3.2 s.
+    assert!(
+        run.elapsed >= logon_window && run.elapsed < logon_window + license_delay / 2,
+        "took {:?}",
+        run.elapsed
+    );
 }
 
 #[tokio::test]
