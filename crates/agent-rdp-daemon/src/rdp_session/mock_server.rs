@@ -617,8 +617,9 @@ async fn the_mock_server_completes_a_confirmed_login() {
 async fn the_client_never_advertises_server_redirection() {
     // A client that sends TS_UD_CS_CLUSTER with REDIRECTION_SUPPORTED gets Server Redirection PDUs
     // from an RD Connection Broker farm (lab control, LAB-REPORT-0.8.0.md). agent-rdp does not
-    // follow them, so it must never advertise support. IronRDP 0.9 sends no cluster block; this
-    // fails if an upgrade starts sending one.
+    // follow them, so it must never advertise support. ironrdp-connector 0.9 sends no cluster block
+    // (connection.rs TODO #139); this fails if an upgrade starts sending one. The mock always selects
+    // TLS-only, so the NLA leg covers the client's offer, not a CredSSP-selected connection.
     for offer_nla in [false, true] {
         let run = run(Script {
             offer_nla,
