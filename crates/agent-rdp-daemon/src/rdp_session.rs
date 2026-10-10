@@ -9,6 +9,7 @@ use anyhow::Result;
 use parking_lot::RwLock;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use agent_rdp_protocol::{AuthFailureReason, DriveMapping};
@@ -86,8 +87,8 @@ fn tls_upgrade_error(error: std::io::Error) -> RdpError {
 }
 
 /// How long an NLA-off `connect()` waits for the server to report the login result before it
-/// fails closed. Short of the SDK's 30 s default request timeout, so the connect response still
-/// reaches the caller.
+/// fails closed, counted from when the credentials left in the Client Info PDU. Short of the
+/// SDK's 30 s default request timeout, so the connect response still reaches the caller.
 const LOGON_OUTCOME_WINDOW: Duration = Duration::from_secs(20);
 
 /// Whether `connect()` must wait for the server to confirm the login. Without CredSSP the server
@@ -99,26 +100,36 @@ fn awaits_logon(connector: &ClientConnector) -> bool {
 
 /// `connect_finalize` for a server that selected TLS-only security. The credentials travel in
 /// the Client Info PDU, and the server may check them as soon as it arrives, so an end after it
-/// was sent fails the login closed (see [`finalize_error`]).
+/// was sent fails the login closed (see [`finalize_error`]), and so does a server that stays
+/// silent past `logon_window`. Returns the deadline for the login confirmation.
 async fn finalize_without_nla(
     mut connector: ClientConnector,
     framed: &mut TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>,
-) -> Result<ConnectionResult, RdpError> {
+    logon_window: Duration,
+) -> Result<(ConnectionResult, Instant), RdpError> {
     let mut buf = WriteBuf::new();
-    let mut credentials_sent = false;
+    let mut logon_deadline = None;
     loop {
         let sends_client_info = matches!(
             connector.state,
             ClientConnectorState::SecureSettingsExchange { .. }
         );
-        if let Err(error) =
-            ironrdp_tokio::single_sequence_step(framed, &mut connector, &mut buf).await
-        {
-            return Err(finalize_error(error, credentials_sent));
+        let step = ironrdp_tokio::single_sequence_step(framed, &mut connector, &mut buf);
+        let stepped = match logon_deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, step)
+                .await
+                .map_err(|_| logon_unconfirmed_after(logon_window))?,
+            None => step.await,
+        };
+        if let Err(error) = stepped {
+            return Err(finalize_error(error, logon_deadline.is_some()));
         }
-        credentials_sent |= sends_client_info;
+        if sends_client_info {
+            logon_deadline = Some(Instant::now() + logon_window);
+        }
         if let ClientConnectorState::Connected { result } = connector.state {
-            return Ok(result);
+            let deadline = logon_deadline.unwrap_or_else(|| Instant::now() + logon_window);
+            return Ok((result, deadline));
         }
     }
 }
@@ -128,7 +139,7 @@ async fn finalize_without_nla(
 fn finalize_error(error: ConnectorError, credentials_sent: bool) -> RdpError {
     match RdpError::from(error) {
         RdpError::ConnectionFailed(message) if credentials_sent => {
-            warn!(%message, "Connection ended after the credentials were sent; ending the login unconfirmed");
+            warn!(%message, "Connect failed after the credentials were sent; ending the login unconfirmed");
             RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed)
         }
         other => other,
@@ -138,7 +149,7 @@ fn finalize_error(error: ConnectorError, credentials_sent: bool) -> RdpError {
 /// The NLA-off login result: success only when the server confirmed the login. Silence and a
 /// session end both fail closed: on some hosts Windows sends nothing for a wrong password, and
 /// the server may have counted the attempt before the session ended.
-fn logon_verdict(report: Option<LogonReport>) -> Result<(), RdpError> {
+fn logon_verdict(report: Option<LogonReport>, window: Duration) -> Result<(), RdpError> {
     match report {
         Some(LogonReport::Outcome(LogonOutcome::Succeeded)) => {
             info!("Server confirmed the login");
@@ -153,16 +164,13 @@ fn logon_verdict(report: Option<LogonReport>) -> Result<(), RdpError> {
                 AuthFailureReason::LogonUnconfirmed,
             ))
         }
-        None => {
-            warn!(
-                "No login confirmation from the server within {:?}; ending the session",
-                LOGON_OUTCOME_WINDOW
-            );
-            Err(RdpError::AuthenticationFailed(
-                AuthFailureReason::LogonUnconfirmed,
-            ))
-        }
+        None => Err(logon_unconfirmed_after(window)),
     }
+}
+
+fn logon_unconfirmed_after(window: Duration) -> RdpError {
+    warn!("No login confirmation from the server within {window:?}; ending the session");
+    RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed)
 }
 
 /// Configuration for an RDP connection.
@@ -283,6 +291,15 @@ impl RdpSession {
         config: RdpConfig,
         disconnect_notify: Option<DisconnectNotify>,
     ) -> Result<Self, RdpError> {
+        Self::connect_within(config, disconnect_notify, LOGON_OUTCOME_WINDOW).await
+    }
+
+    /// [`Self::connect`] with the NLA-off logon window as a parameter.
+    async fn connect_within(
+        config: RdpConfig,
+        disconnect_notify: Option<DisconnectNotify>,
+        logon_window: Duration,
+    ) -> Result<Self, RdpError> {
         info!("Connecting to {}:{}", config.host, config.port);
 
         let connector_config = build_connector_config(&config);
@@ -391,10 +408,12 @@ impl RdpSession {
         let server_name: ServerName = config.host.clone().into();
 
         // Finalize connection (post-TLS)
-        let connection_result = if await_logon {
-            finalize_without_nla(connector, &mut upgraded_framed).await?
+        let (connection_result, logon_deadline) = if await_logon {
+            let (result, deadline) =
+                finalize_without_nla(connector, &mut upgraded_framed, logon_window).await?;
+            (result, Some(deadline))
         } else {
-            ironrdp_tokio::connect_finalize(
+            let result = ironrdp_tokio::connect_finalize(
                 upgraded,
                 connector,
                 &mut upgraded_framed,
@@ -403,7 +422,8 @@ impl RdpSession {
                 server_public_key,
                 None, // No Kerberos
             )
-            .await?
+            .await?;
+            (result, None)
         };
 
         info!("RDP connection established to {}", config.host);
@@ -415,11 +435,12 @@ impl RdpSession {
             connection_result.desktop_size.height,
         );
 
-        let (logon_tx, logon_rx) = if await_logon {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
+        let (logon_tx, logon_rx) = match logon_deadline {
+            Some(deadline) => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                (Some(tx), Some((rx, deadline)))
+            }
+            None => (None, None),
         };
         let logon_watch = LogonWatch::new(connection_result.io_channel_id, logon_tx);
 
@@ -455,9 +476,10 @@ impl RdpSession {
             .await;
         });
 
-        if let Some(logon_rx) = logon_rx {
-            let report = logon::await_logon_report(logon_rx, LOGON_OUTCOME_WINDOW).await;
-            if let Err(error) = logon_verdict(report) {
+        if let Some((logon_rx, deadline)) = logon_rx {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let report = logon::await_logon_report(logon_rx, remaining).await;
+            if let Err(error) = logon_verdict(report, logon_window) {
                 // Leave no session sitting at the Windows logon screen. A graceful shutdown does
                 // not report a drop to the daemon, and is a no-op when the session already ended.
                 let _ = command_tx.send(SessionCommand::Shutdown).await;
@@ -1096,11 +1118,15 @@ mod tests {
         assert!(connector.enable_tls);
     }
 
+    fn verdict(report: Option<LogonReport>) -> Result<(), RdpError> {
+        logon_verdict(report, LOGON_OUTCOME_WINDOW)
+    }
+
     #[test]
     fn only_a_confirmed_login_succeeds() {
-        assert!(logon_verdict(Some(LogonReport::Outcome(LogonOutcome::Succeeded))).is_ok());
+        assert!(verdict(Some(LogonReport::Outcome(LogonOutcome::Succeeded))).is_ok());
         assert!(matches!(
-            logon_verdict(Some(LogonReport::Outcome(LogonOutcome::Failed(
+            verdict(Some(LogonReport::Outcome(LogonOutcome::Failed(
                 AuthFailureReason::LogonFailedBadPassword
             )))),
             Err(RdpError::AuthenticationFailed(
@@ -1108,7 +1134,7 @@ mod tests {
             ))
         ));
         assert!(matches!(
-            logon_verdict(Some(LogonReport::SessionEnded)),
+            verdict(Some(LogonReport::SessionEnded)),
             Err(RdpError::AuthenticationFailed(
                 AuthFailureReason::LogonUnconfirmed
             ))
@@ -1143,7 +1169,7 @@ mod tests {
     #[test]
     fn a_silent_server_fails_the_login_closed() {
         assert!(matches!(
-            logon_verdict(None),
+            verdict(None),
             Err(RdpError::AuthenticationFailed(
                 AuthFailureReason::LogonUnconfirmed
             ))

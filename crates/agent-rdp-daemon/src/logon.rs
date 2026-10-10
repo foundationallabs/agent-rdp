@@ -76,12 +76,20 @@ pub fn logon_outcome(io_channel_id: u16, action: Action, frame: &[u8]) -> Option
     let ShareDataPdu::SaveSessionInfo(session_info) = data.pdu else {
         return None;
     };
+    let info_type = session_info.info_type;
     match session_info.info_data {
         InfoData::LogonInfoV1(_) | InfoData::LogonInfoV2(_) | InfoData::PlainNotify => {
+            info!(?info_type, "Server sent a logon notification");
             Some(LogonOutcome::Succeeded)
         }
         InfoData::LogonExtended(extended) => {
-            let errors = extended.errors_info?;
+            let Some(errors) = extended.errors_info else {
+                info!(
+                    fields = ?extended.present_fields_flags,
+                    "Server sent extended logon info without errors"
+                );
+                return None;
+            };
             info!(
                 error_type = ?errors.error_type,
                 error_data = ?errors.error_data,
@@ -94,16 +102,18 @@ pub fn logon_outcome(io_channel_id: u16, action: Action, frame: &[u8]) -> Option
 
 /// Map a Logon Errors Info structure to a login failure.
 ///
-/// The data field holds a LOGON_FAILED_* code only alongside SESSION_CONTINUE or
-/// SESSION_TERMINATE; with the session-choice types it is a session ID that can collide with
-/// those codes, so it is not read there.
+/// SESSION_CONTINUE is informational whatever its data: the logon goes on, and a WS2019 broker
+/// farm sends it with LOGON_FAILED_OTHER on every good logon. The data field holds a
+/// LOGON_FAILED_* code only alongside SESSION_CONTINUE or SESSION_TERMINATE; with the
+/// session-choice types it is a session ID that can collide with those codes, so it is not read
+/// there.
 fn logon_error_reason(errors: &LogonErrorsInfo) -> Option<AuthFailureReason> {
     use LogonErrorNotificationDataErrorCode as Code;
     use LogonErrorNotificationType as Type;
     match errors.error_type {
         Type::NoPermission => Some(AuthFailureReason::NoPermission),
         Type::AccessDenied => Some(AuthFailureReason::AccessDenied),
-        Type::SessionContinue | Type::SessionTerminate => match errors.error_data {
+        Type::SessionTerminate => match errors.error_data {
             LogonErrorNotificationData::ErrorCode(Code::FailedBadPassword) => {
                 Some(AuthFailureReason::LogonFailedBadPassword)
             }
@@ -116,7 +126,8 @@ fn logon_error_reason(errors: &LogonErrorsInfo) -> Option<AuthFailureReason> {
             LogonErrorNotificationData::ErrorCode(Code::Warning)
             | LogonErrorNotificationData::SessionId(_) => None,
         },
-        Type::SessionBusyOptions
+        Type::SessionContinue
+        | Type::SessionBusyOptions
         | Type::DisconnectRefused
         | Type::BumpOptions
         | Type::ReconnectOptions => None,
@@ -342,7 +353,7 @@ mod tests {
     #[test]
     fn bad_password_logon_error_fails_the_login() {
         let frame = logon_errors_frame(
-            LogonErrorNotificationType::SessionContinue,
+            LogonErrorNotificationType::SessionTerminate,
             LogonErrorNotificationData::ErrorCode(
                 LogonErrorNotificationDataErrorCode::FailedBadPassword,
             ),
@@ -367,12 +378,12 @@ mod tests {
                 AuthFailureReason::LogonFailedBadPassword,
             ),
             (
-                Type::SessionContinue,
+                Type::SessionTerminate,
                 Data::ErrorCode(Code::FailedUpdatePassword),
                 AuthFailureReason::LogonFailedUpdatePassword,
             ),
             (
-                Type::SessionContinue,
+                Type::SessionTerminate,
                 Data::ErrorCode(Code::FailedOther),
                 AuthFailureReason::LogonFailedOther,
             ),
@@ -403,8 +414,13 @@ mod tests {
         use LogonErrorNotificationDataErrorCode as Code;
         use LogonErrorNotificationType as Type;
         for (error_type, error_data) in [
+            // SESSION_CONTINUE is informational; a broker farm sends it with FAILED_OTHER.
+            (Type::SessionContinue, Data::ErrorCode(Code::FailedOther)),
+            (Type::SessionContinue, Data::ErrorCode(Code::FailedBadPassword)),
+            (Type::SessionContinue, Data::ErrorCode(Code::FailedUpdatePassword)),
             (Type::SessionContinue, Data::ErrorCode(Code::Warning)),
             (Type::SessionContinue, Data::SessionId(7)),
+            (Type::SessionTerminate, Data::ErrorCode(Code::Warning)),
             // Session-choice dialogs carry a session ID; ID 0..2 decodes like a failure code.
             (Type::ReconnectOptions, Data::ErrorCode(Code::FailedOther)),
             (Type::BumpOptions, Data::ErrorCode(Code::FailedBadPassword)),
@@ -451,7 +467,7 @@ mod tests {
     #[test]
     fn frames_off_the_io_channel_or_fast_path_are_ignored() {
         let frame = logon_errors_frame(
-            LogonErrorNotificationType::SessionContinue,
+            LogonErrorNotificationType::SessionTerminate,
             LogonErrorNotificationData::ErrorCode(
                 LogonErrorNotificationDataErrorCode::FailedBadPassword,
             ),
@@ -466,7 +482,7 @@ mod tests {
 
     fn bad_password_frame() -> Vec<u8> {
         logon_errors_frame(
-            LogonErrorNotificationType::SessionContinue,
+            LogonErrorNotificationType::SessionTerminate,
             LogonErrorNotificationData::ErrorCode(
                 LogonErrorNotificationDataErrorCode::FailedBadPassword,
             ),
