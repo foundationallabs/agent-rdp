@@ -135,6 +135,8 @@ pub enum LogonReport {
 pub struct LogonWatch {
     io_channel_id: u16,
     report_tx: Option<oneshot::Sender<LogonReport>>,
+    awaited: bool,
+    confirmed: bool,
 }
 
 impl LogonWatch {
@@ -142,7 +144,9 @@ impl LogonWatch {
     pub fn new(io_channel_id: u16, report_tx: Option<oneshot::Sender<LogonReport>>) -> Self {
         Self {
             io_channel_id,
+            awaited: report_tx.is_some(),
             report_tx,
+            confirmed: false,
         }
     }
 
@@ -151,7 +155,8 @@ impl LogonWatch {
     pub fn observe(&mut self, action: Action, frame: &[u8]) -> Option<AuthFailureReason> {
         match logon_outcome(self.io_channel_id, action, frame)? {
             LogonOutcome::Succeeded => {
-                self.report(LogonReport::Outcome(LogonOutcome::Succeeded));
+                // Confirmed only once connect() took it; it may already have given up.
+                self.confirmed |= self.report(LogonReport::Outcome(LogonOutcome::Succeeded));
                 None
             }
             LogonOutcome::Failed(reason) => Some(reason),
@@ -162,15 +167,15 @@ impl LogonWatch {
     /// confirmed: `connect()` then answers the caller itself, or has already given up and is
     /// ending the session, so the daemon must not be told the connection dropped.
     pub fn finish(mut self, end: LogonReport) -> bool {
-        let unconfirmed = self.report_tx.is_some();
         self.report(end);
-        unconfirmed
+        self.awaited && !self.confirmed
     }
 
-    fn report(&mut self, report: LogonReport) {
-        if let Some(tx) = self.report_tx.take() {
-            let _ = tx.send(report);
-        }
+    /// Returns `true` when `connect()` received the report.
+    fn report(&mut self, report: LogonReport) -> bool {
+        self.report_tx
+            .take()
+            .is_some_and(|tx| tx.send(report).is_ok())
     }
 }
 
@@ -479,7 +484,9 @@ mod tests {
             rx.try_recv(),
             Ok(LogonReport::Outcome(LogonOutcome::Succeeded))
         );
-        // The result is handed over once; a later drop is the daemon's to hear about.
+        // The result is handed over once; a later drop is the daemon's to hear about, even
+        // when the server sends a second logon notification.
+        assert_eq!(watch.observe(Action::X224, &frame), None);
         assert!(!watch.finish(LogonReport::SessionEnded));
     }
 
@@ -535,6 +542,15 @@ mod tests {
         assert!(watch.finish(LogonReport::Outcome(LogonOutcome::Failed(
             AuthFailureReason::LogonFailedBadPassword
         ))));
+
+        // A confirmation that arrives after connect() gave up confirms nothing.
+        let (tx, mut rx) = oneshot::channel();
+        assert_eq!(settle_after_deadline(&mut rx), None);
+        let mut watch = LogonWatch::new(IO_CHANNEL, Some(tx));
+        let frame =
+            save_session_info_frame(IO_CHANNEL, InfoType::PlainNotify, InfoData::PlainNotify);
+        assert_eq!(watch.observe(Action::X224, &frame), None);
+        assert!(watch.finish(LogonReport::SessionEnded));
     }
 
     #[tokio::test]
