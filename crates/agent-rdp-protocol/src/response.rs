@@ -272,7 +272,7 @@ pub struct ErrorInfo {
 /// Why a login failed.
 ///
 /// CredSSP (NLA) failures carry the NTSTATUS the server returned; NLA-off failures carry the
-/// Save Session Info logon error (MS-RDPBCGR 2.2.10.1.1.4.1.1), or `LogonUnconfirmed` when the
+/// Save Session Info logon error (MS-RDPBCGR 2.2.10.1.1.4.1.1), or `logon_unconfirmed` when the
 /// server never confirmed the login.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export, export_to = "../../../packages/agent-rdp/src/generated/")]

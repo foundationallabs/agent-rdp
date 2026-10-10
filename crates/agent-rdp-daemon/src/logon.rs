@@ -158,16 +158,19 @@ impl LogonWatch {
         }
     }
 
-    /// Hand the session's end to a waiting `connect()`. Returns `true` when `connect()` took it
-    /// and answers the caller itself, so the daemon must not be told the connection dropped.
+    /// Hand the session's end to a waiting `connect()`. Returns `true` when the login was never
+    /// confirmed: `connect()` then answers the caller itself, or has already given up and is
+    /// ending the session, so the daemon must not be told the connection dropped.
     pub fn finish(mut self, end: LogonReport) -> bool {
-        self.report(end)
+        let unconfirmed = self.report_tx.is_some();
+        self.report(end);
+        unconfirmed
     }
 
-    fn report(&mut self, report: LogonReport) -> bool {
-        self.report_tx
-            .take()
-            .is_some_and(|tx| tx.send(report).is_ok())
+    fn report(&mut self, report: LogonReport) {
+        if let Some(tx) = self.report_tx.take() {
+            let _ = tx.send(report);
+        }
     }
 }
 
@@ -182,8 +185,8 @@ pub async fn await_logon_report(
     }
 }
 
-/// Close first so a report racing the deadline is either received here or refused to the frame
-/// processor, which then tells the daemon itself. Never both, never neither.
+/// Close first so a report racing the deadline is either received here or refused. A refused
+/// report is dropped: `connect()` fails the login and ends the session either way.
 fn settle_after_deadline(report_rx: &mut oneshot::Receiver<LogonReport>) -> Option<LogonReport> {
     report_rx.close();
     report_rx.try_recv().ok()
@@ -514,12 +517,24 @@ mod tests {
             Some(AuthFailureReason::LogonFailedBadPassword)
         );
         assert!(!watch.finish(LogonReport::SessionEnded));
+    }
 
-        // NLA off, but connect() stopped waiting.
+    #[test]
+    fn an_end_after_connect_gave_up_is_not_a_drop() {
+        // connect() stopped waiting and is failing the login, so a session end or rejection that
+        // loses the race against its shutdown must not stop the daemon.
         let (tx, rx) = oneshot::channel();
         drop(rx);
         let watch = LogonWatch::new(IO_CHANNEL, Some(tx));
-        assert!(!watch.finish(LogonReport::SessionEnded));
+        assert!(watch.finish(LogonReport::SessionEnded));
+
+        let (tx, mut rx) = oneshot::channel();
+        assert_eq!(settle_after_deadline(&mut rx), None);
+        let mut watch = LogonWatch::new(IO_CHANNEL, Some(tx));
+        assert!(watch.observe(Action::X224, &bad_password_frame()).is_some());
+        assert!(watch.finish(LogonReport::Outcome(LogonOutcome::Failed(
+            AuthFailureReason::LogonFailedBadPassword
+        ))));
     }
 
     #[tokio::test]
@@ -569,8 +584,7 @@ mod tests {
 
         let (tx, mut rx) = oneshot::channel();
         assert_eq!(settle_after_deadline(&mut rx), None);
-        // rx is still alive, yet the late report is refused, so the frame processor knows to
-        // tell the daemon.
+        // rx is still alive, yet the late report is refused.
         assert!(tx.send(LogonReport::SessionEnded).is_err());
     }
 }

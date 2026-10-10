@@ -4,7 +4,7 @@
  * Why a login failed.
  *
  * CredSSP (NLA) failures carry the NTSTATUS the server returned; NLA-off failures carry the
- * Save Session Info logon error (MS-RDPBCGR 2.2.10.1.1.4.1.1), or `LogonUnconfirmed` when the
+ * Save Session Info logon error (MS-RDPBCGR 2.2.10.1.1.4.1.1), or `logon_unconfirmed` when the
  * server never confirmed the login.
  */
 export type AuthFailureReason = "logon_failure" | "wrong_password" | "no_such_user" | "account_locked_out" | "account_disabled" | "account_restriction" | "password_expired" | "password_must_change" | "invalid_logon_hours" | "invalid_workstation" | "logon_not_granted" | "logon_type_not_granted" | "logon_denied" | "access_denied" | "logon_failed_bad_password" | "logon_failed_update_password" | "logon_failed_other" | "no_permission" | "logon_unconfirmed";

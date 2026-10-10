@@ -12,8 +12,8 @@ use crate::rdp_session::{DisconnectNotify, RdpConfig, RdpError, RdpSession};
 use crate::tls::CertPin;
 use crate::ws_server::{get_stream_fps, WsServer, WsServerConfig};
 
-/// The response for a failed connect. Only a refused login is `authentication_failed`; the
-/// session manager retries every other failure.
+/// The response for a failed connect. Only a refused or unconfirmed login is
+/// `authentication_failed`; the session manager retries every other failure.
 fn connect_error_response(error: &RdpError) -> Response {
     match error {
         RdpError::AuthenticationFailed(reason) => {

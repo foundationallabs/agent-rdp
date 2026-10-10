@@ -840,8 +840,9 @@ async fn run_frame_processor(
 
     info!("Frame processor stopped (graceful={})", graceful_shutdown);
 
-    // A connect() still waiting for the login answers its caller itself. Otherwise notify the
-    // daemon of the connection drop (unless this was a graceful shutdown).
+    // An unconfirmed login is connect()'s to answer: it reports the end itself or is already
+    // failing the login. Otherwise notify the daemon of the connection drop (unless this was a
+    // graceful shutdown).
     let connect_reports = logon_watch.finish(end);
     if !graceful_shutdown && !connect_reports {
         if let Some(notify) = disconnect_notify {
