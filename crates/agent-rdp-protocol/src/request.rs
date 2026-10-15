@@ -100,6 +100,12 @@ pub struct ConnectRequest {
     #[ts(optional)]
     pub server_cert_pin: Option<String>,
 
+    /// When the server skips NLA and has not confirmed the login 5 s after the connection came
+    /// up, press Enter once to dismiss a Windows pre-logon notice (the "legal notice" policy)
+    /// and keep waiting (default: false).
+    #[serde(default)]
+    pub acknowledge_logon_notice: bool,
+
     /// Desktop width in pixels.
     pub width: u16,
 
@@ -149,6 +155,7 @@ impl std::fmt::Debug for ConnectRequest {
             alternate_shell,
             enable_credssp,
             server_cert_pin,
+            acknowledge_logon_notice,
             width,
             height,
             drives,
@@ -167,6 +174,7 @@ impl std::fmt::Debug for ConnectRequest {
             .field("alternate_shell", alternate_shell)
             .field("enable_credssp", enable_credssp)
             .field("server_cert_pin", server_cert_pin)
+            .field("acknowledge_logon_notice", acknowledge_logon_notice)
             .field("width", width)
             .field("height", height)
             .field("drives", drives)
@@ -190,6 +198,7 @@ impl Default for ConnectRequest {
             alternate_shell: None,
             enable_credssp: None,
             server_cert_pin: None,
+            acknowledge_logon_notice: false,
             width: 1280,
             height: 800,
             drives: Vec::new(),
@@ -481,6 +490,27 @@ mod tests {
             "width":1280,"height":800}"#;
         match serde_json::from_str::<Request>(json).unwrap() {
             Request::Connect(c) => assert_eq!(c.server_cert_pin, None),
+            _ => panic!("unexpected request type"),
+        }
+    }
+
+    #[test]
+    fn test_connect_acknowledge_logon_notice_defaults_off_and_round_trips() {
+        // Payload from a client that predates `acknowledge_logon_notice`.
+        let json = r#"{"type":"connect","host":"h","port":3389,"username":"u","password":"p",
+            "width":1280,"height":800}"#;
+        match serde_json::from_str::<Request>(json).unwrap() {
+            Request::Connect(c) => assert!(!c.acknowledge_logon_notice),
+            _ => panic!("unexpected request type"),
+        }
+
+        let req = Request::Connect(ConnectRequest {
+            acknowledge_logon_notice: true,
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&req).unwrap();
+        match serde_json::from_str::<Request>(&json).unwrap() {
+            Request::Connect(c) => assert!(c.acknowledge_logon_notice),
             _ => panic!("unexpected request type"),
         }
     }

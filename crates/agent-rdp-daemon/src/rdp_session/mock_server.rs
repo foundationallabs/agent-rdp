@@ -9,6 +9,7 @@ use ironrdp::pdu::gcc::{
     ClientGccBlocks, ConferenceCreateResponse, ServerCoreData, ServerCoreOptionalData,
     ServerEarlyCapabilityFlags, ServerGccBlocks, ServerNetworkData, ServerSecurityData,
 };
+use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::mcs::{
     AttachUserConfirm, ConnectInitial, ConnectResponse, DomainParameters, SendDataIndication,
     SendDataRequest,
@@ -36,7 +37,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::server::TlsStream;
 
 use super::tests::test_config;
-use super::{RdpConfig, RdpError, RdpSession, LOGON_OUTCOME_WINDOW};
+use super::{
+    key_to_scancode, LogonTiming, RdpConfig, RdpError, RdpSession, LOGON_OUTCOME_WINDOW,
+    LOGON_TIMING,
+};
 use agent_rdp_protocol::AuthFailureReason;
 
 const CERT: &[u8] = include_bytes!("../../testdata/tls/server-a.crt.der");
@@ -63,6 +67,9 @@ enum Stop {
     SilentAfterConnect,
     /// Never: the server confirms the login and keeps the connection open.
     Confirm,
+    /// Never: the server holds the login at a pre-logon notice, confirms it once Enter is
+    /// pressed, and keeps the connection open.
+    ConfirmOnEnter,
 }
 
 /// How the server ends the connection at its stop point.
@@ -100,8 +107,11 @@ struct Script {
     /// How long the server waits after the Client Info PDU before it answers.
     license_delay: Duration,
     alternate_shell: Option<String>,
-    /// A shorter logon window through `connect_within`; `None` runs the production `connect`.
+    /// A shorter logon window through `connect_within`; `None` runs the production window.
     logon_window: Option<Duration>,
+    /// A shorter notice delay through `connect_within`; `None` runs the production delay.
+    notice_delay: Option<Duration>,
+    acknowledge_logon_notice: bool,
 }
 
 impl Script {
@@ -116,6 +126,8 @@ impl Script {
             license_delay: Duration::ZERO,
             alternate_shell: None,
             logon_window: None,
+            notice_delay: None,
+            acknowledge_logon_notice: false,
         }
     }
 }
@@ -129,6 +141,8 @@ struct Run {
     since_credentials: Option<Duration>,
     /// The GCC blocks of the client's MCS Connect Initial.
     client_gcc: ClientGccBlocks,
+    /// Enter presses the server received after the connection sequence.
+    enter_presses: usize,
 }
 
 /// What the server saw of one connect.
@@ -136,6 +150,7 @@ struct Served {
     client_gcc: ClientGccBlocks,
     /// When the Client Info PDU arrived, if it did.
     credentials_at: Option<Instant>,
+    enter_presses: usize,
 }
 
 impl Run {
@@ -159,12 +174,19 @@ async fn run(script: Script) -> Run {
         }
     });
 
-    let config = loopback_config(port, script.offer_nla, script.alternate_shell.as_deref());
+    let mut config = loopback_config(port, script.offer_nla, script.alternate_shell.as_deref());
+    config.acknowledge_logon_notice = script.acknowledge_logon_notice;
     let started = Instant::now();
     let connect = async {
-        match script.logon_window {
-            Some(window) => RdpSession::connect_within(config, None, window).await,
-            None => RdpSession::connect(config, None).await,
+        match (script.logon_window, script.notice_delay) {
+            (None, None) => RdpSession::connect(config, None).await,
+            (window, notice_delay) => {
+                let timing = LogonTiming {
+                    window: window.unwrap_or(LOGON_TIMING.window),
+                    notice_delay: notice_delay.unwrap_or(LOGON_TIMING.notice_delay),
+                };
+                RdpSession::connect_within(config, None, timing).await
+            }
         }
     };
     let result = tokio::time::timeout(Duration::from_secs(30), connect)
@@ -176,6 +198,7 @@ async fn run(script: Script) -> Run {
     let Served {
         client_gcc,
         credentials_at,
+        enter_presses,
     } = tokio::time::timeout(Duration::from_secs(10), server)
         .await
         .expect("server did not finish")
@@ -186,6 +209,7 @@ async fn run(script: Script) -> Run {
         credentials_received: credentials_at.is_some(),
         since_credentials: credentials_at.map(|at| ended - at),
         client_gcc,
+        enter_presses,
     }
 }
 
@@ -232,6 +256,7 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Served {
         return Served {
             client_gcc,
             credentials_at: None,
+            enter_presses: 0,
         };
     }
 
@@ -248,6 +273,7 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Served {
         return Served {
             client_gcc,
             credentials_at: (!received.is_empty()).then(Instant::now),
+            enter_presses: 0,
         };
     }
     let frame = read_frame(&mut tls).await;
@@ -261,6 +287,7 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Served {
             return Served {
                 client_gcc,
                 credentials_at,
+                enter_presses: 0,
             };
         }
         Stop::StallAfterClientInfo => {
@@ -268,6 +295,7 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Served {
             return Served {
                 client_gcc,
                 credentials_at,
+                enter_presses: 0,
             };
         }
         _ => {}
@@ -302,23 +330,36 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Served {
     if let SessionContinue::AfterFontMap = script.session_continue {
         write_frame(&mut tls, &session_info(session_continue())).await;
     }
-    match stop {
-        Stop::AfterConnect => finish(tls, end).await,
-        Stop::SilentAfterConnect => {
-            read_until_closed(&mut tls).await;
+    let enter_presses = match stop {
+        Stop::AfterConnect => {
+            finish(tls, end).await;
+            0
         }
+        Stop::SilentAfterConnect => count_enter_until_closed(&mut tls).await,
         Stop::Confirm => {
             write_frame(&mut tls, &session_info(script.confirmation)).await;
-            read_until_closed(&mut tls).await;
+            count_enter_until_closed(&mut tls).await
+        }
+        Stop::ConfirmOnEnter => {
+            let mut presses = 0;
+            while let Some(pdu) = read_pdu(&mut tls).await {
+                presses += enter_presses(&pdu);
+                if presses > 0 {
+                    write_frame(&mut tls, &session_info(script.confirmation)).await;
+                    break;
+                }
+            }
+            presses + count_enter_until_closed(&mut tls).await
         }
         Stop::BeforeClientInfo
         | Stop::ReadAfterAttach
         | Stop::AfterClientInfo
         | Stop::StallAfterClientInfo => unreachable!(),
-    }
+    };
     Served {
         client_gcc,
         credentials_at,
+        enter_presses,
     }
 }
 
@@ -353,6 +394,53 @@ async fn read_until_closed(tls: &mut TlsStream<TcpStream>) -> Vec<u8> {
     let mut received = Vec::new();
     let _ = tls.read_to_end(&mut received).await;
     received
+}
+
+/// Reads PDUs until the client closes the connection. Returns the Enter presses among them.
+async fn count_enter_until_closed(tls: &mut TlsStream<TcpStream>) -> usize {
+    let mut presses = 0;
+    while let Some(pdu) = read_pdu(tls).await {
+        presses += enter_presses(&pdu);
+    }
+    presses
+}
+
+/// Reads one client PDU, TPKT or fast-path. `None` once the client closed, cleanly or not.
+async fn read_pdu(stream: &mut (impl AsyncRead + Unpin)) -> Option<Vec<u8>> {
+    let mut pdu = vec![0u8; 2];
+    stream.read_exact(&mut pdu).await.ok()?;
+    let length = if pdu[0] == 3 {
+        pdu.resize(4, 0);
+        stream.read_exact(&mut pdu[2..]).await.ok()?;
+        usize::from(u16::from_be_bytes([pdu[2], pdu[3]]))
+    } else if pdu[1] & 0x80 != 0 {
+        pdu.push(0);
+        stream.read_exact(&mut pdu[2..]).await.ok()?;
+        usize::from(u16::from_be_bytes([pdu[1] & 0x7f, pdu[2]]))
+    } else {
+        usize::from(pdu[1])
+    };
+    let read = pdu.len();
+    pdu.resize(length, 0);
+    stream.read_exact(&mut pdu[read..]).await.ok()?;
+    Some(pdu)
+}
+
+/// Enter key-downs in a fast-path input PDU. Other PDUs have none.
+fn enter_presses(pdu: &[u8]) -> usize {
+    if pdu[0] == 3 {
+        return 0;
+    }
+    let (enter, _) = key_to_scancode("enter").unwrap();
+    let input = ironrdp::pdu::decode::<FastPathInput>(pdu).unwrap();
+    input
+        .input_events()
+        .iter()
+        .filter(|event| {
+            matches!(event, FastPathInputEvent::KeyboardEvent(flags, code)
+                if *code == enter && !flags.contains(KeyboardFlags::RELEASE))
+        })
+        .count()
 }
 
 fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
@@ -692,4 +780,70 @@ async fn nla_on_still_runs_credssp_first() {
         ),
         "an NLA-on end is never an unconfirmed login"
     );
+}
+
+#[tokio::test]
+async fn a_pre_logon_notice_is_answered_with_one_enter() {
+    let notice_delay = Duration::from_millis(300);
+    let run = run(Script {
+        acknowledge_logon_notice: true,
+        notice_delay: Some(notice_delay),
+        logon_window: Some(Duration::from_secs(5)),
+        ..Script::new(Stop::ConfirmOnEnter, End::Close)
+    })
+    .await;
+    assert!(run.result.is_ok(), "got {:?}", run.result.err());
+    assert_eq!(run.enter_presses, 1);
+    assert!(run.elapsed >= notice_delay, "took {:?}", run.elapsed);
+}
+
+#[tokio::test]
+async fn without_the_option_a_pre_logon_notice_fails_closed_untouched() {
+    let run = run(Script {
+        logon_window: Some(Duration::from_secs(1)),
+        ..Script::new(Stop::ConfirmOnEnter, End::Close)
+    })
+    .await;
+    assert_unconfirmed(&run);
+    assert_eq!(run.enter_presses, 0);
+}
+
+#[tokio::test]
+async fn an_unanswered_notice_gets_one_enter_then_fails_closed() {
+    // A second Enter on a sign-in screen could submit an empty password.
+    let logon_window = Duration::from_millis(1500);
+    let run = run(Script {
+        acknowledge_logon_notice: true,
+        notice_delay: Some(Duration::from_millis(200)),
+        logon_window: Some(logon_window),
+        ..Script::new(Stop::SilentAfterConnect, End::Close)
+    })
+    .await;
+    assert_unconfirmed(&run);
+    assert_eq!(run.enter_presses, 1);
+    assert!(run.elapsed >= logon_window, "took {:?}", run.elapsed);
+}
+
+#[tokio::test]
+async fn a_prompt_login_gets_no_enter() {
+    let run = run(Script {
+        acknowledge_logon_notice: true,
+        ..Script::new(Stop::Confirm, End::Close)
+    })
+    .await;
+    assert!(run.result.is_ok(), "got {:?}", run.result.err());
+    assert_eq!(run.enter_presses, 0);
+}
+
+#[tokio::test]
+async fn a_notice_delay_past_the_window_presses_nothing() {
+    let run = run(Script {
+        acknowledge_logon_notice: true,
+        notice_delay: Some(Duration::from_secs(2)),
+        logon_window: Some(Duration::from_secs(1)),
+        ..Script::new(Stop::SilentAfterConnect, End::Close)
+    })
+    .await;
+    assert_unconfirmed(&run);
+    assert_eq!(run.enter_presses, 0);
 }

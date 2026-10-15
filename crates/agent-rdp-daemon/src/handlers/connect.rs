@@ -59,6 +59,7 @@ fn build_rdp_config(
         drives,
         automation_dvc_state,
         server_cert_pin,
+        acknowledge_logon_notice: params.acknowledge_logon_notice,
     }
 }
 

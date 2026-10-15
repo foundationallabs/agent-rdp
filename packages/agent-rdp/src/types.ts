@@ -88,6 +88,12 @@ export interface ConnectOptions {
    * set, connect fails with `certificate_mismatch` unless the server holds that key.
    */
   serverCertPin?: string;
+  /**
+   * When the server skips NLA (as with `enableNla: false`): press Enter once if it has not
+   * confirmed the login 5 s after connecting, to dismiss a Windows pre-logon notice (the "legal notice" policy), which
+   * otherwise holds the login until it fails as `logon_unconfirmed` (default: false).
+   */
+  acknowledgeLogonNotice?: boolean;
   width?: number;
   height?: number;
   drives?: DriveMapping[];
