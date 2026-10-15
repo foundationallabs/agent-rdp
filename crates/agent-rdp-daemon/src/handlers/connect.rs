@@ -8,22 +8,22 @@ use tracing::{info, warn};
 
 use crate::automation::{AutomationBootstrap, SharedAutomationState, SharedDvcState};
 use crate::daemon::{ClipboardChangedRx, SharedWsHandle};
-use crate::rdp_session::{DisconnectNotify, RdpConfig, RdpError, RdpSession};
+use crate::rdp_session::{ConnectTrace, DisconnectNotify, RdpConfig, RdpError, RdpSession};
 use crate::tls::CertPin;
 use crate::ws_server::{get_stream_fps, WsServer, WsServerConfig};
 
-/// The response for a failed connect. Only a refused or unconfirmed login is
-/// `authentication_failed`; the session manager retries every other failure.
-fn connect_error_response(error: &RdpError) -> Response {
-    match error {
+/// The response for a failed connect, carrying its phases. See [`RdpError::connect_error_code`].
+fn connect_error_response(error: &RdpError, trace: ConnectTrace) -> Response {
+    let mut response = match error {
         RdpError::AuthenticationFailed(reason) => {
             Response::authentication_failed(Some(*reason), error.to_string())
         }
-        RdpError::CertificateMismatch(_) => {
-            Response::error(ErrorCode::CertificateMismatch, error.to_string())
-        }
-        _ => Response::error(ErrorCode::ConnectionFailed, error.to_string()),
+        _ => Response::error(error.connect_error_code(), error.to_string()),
+    };
+    if let Some(info) = response.error.as_mut() {
+        info.phases = Some(trace.into_phases());
     }
+    response
 }
 
 /// Parse the request's server certificate pin, if it has one.
@@ -150,9 +150,10 @@ pub async fn handle(
     let config = build_rdp_config(params, drives, automation_dvc_state, server_cert_pin);
 
     // Attempt connection
-    let rdp = match RdpSession::connect(config, Some(disconnect_notify)).await {
+    let mut trace = ConnectTrace::default();
+    let rdp = match RdpSession::connect(config, Some(disconnect_notify), &mut trace).await {
         Ok(rdp) => rdp,
-        Err(e) => return connect_error_response(&e),
+        Err(e) => return connect_error_response(&e, trace),
     };
 
     let host = rdp.host();
@@ -235,6 +236,7 @@ pub async fn handle(
         host,
         width,
         height,
+        phases: Some(trace.into_phases()),
     })
 }
 
@@ -288,9 +290,10 @@ mod tests {
 
     #[test]
     fn refused_login_is_authentication_failed_with_reason() {
-        let response = connect_error_response(&RdpError::AuthenticationFailed(
-            AuthFailureReason::AccountLockedOut,
-        ));
+        let response = connect_error_response(
+            &RdpError::AuthenticationFailed(AuthFailureReason::AccountLockedOut),
+            ConnectTrace::default(),
+        );
         let error = response.error.unwrap();
         assert_eq!(error.code, ErrorCode::AuthenticationFailed);
         assert_eq!(error.reason, Some(AuthFailureReason::AccountLockedOut));
@@ -302,7 +305,9 @@ mod tests {
             RdpError::ConnectionFailed("refused".to_string()),
             RdpError::TlsError("handshake".to_string()),
         ] {
-            let error = connect_error_response(&error).error.unwrap();
+            let error = connect_error_response(&error, ConnectTrace::default())
+                .error
+                .unwrap();
             assert_eq!(error.code, ErrorCode::ConnectionFailed);
             assert_eq!(error.reason, None);
         }
@@ -310,9 +315,12 @@ mod tests {
 
     #[test]
     fn pin_mismatch_is_certificate_mismatch() {
-        let error = connect_error_response(&RdpError::CertificateMismatch("key".to_string()))
-            .error
-            .unwrap();
+        let error = connect_error_response(
+            &RdpError::CertificateMismatch("key".to_string()),
+            ConnectTrace::default(),
+        )
+        .error
+        .unwrap();
         assert_eq!(error.code, ErrorCode::CertificateMismatch);
         assert_eq!(error.reason, None);
     }

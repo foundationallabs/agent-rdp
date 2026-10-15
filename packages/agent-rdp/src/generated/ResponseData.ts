@@ -2,6 +2,7 @@
 import type { AccessibilitySnapshot } from "./AccessibilitySnapshot.js";
 import type { AutomationStatus } from "./AutomationStatus.js";
 import type { ClickResult } from "./ClickResult.js";
+import type { ConnectPhase } from "./ConnectPhase.js";
 import type { ElementValue } from "./ElementValue.js";
 import type { LocateResult } from "./LocateResult.js";
 import type { MappedDrive } from "./MappedDrive.js";
@@ -25,7 +26,11 @@ width: number,
 /**
  * Desktop height.
  */
-height: number, } | { "type": "screenshot", 
+height: number, 
+/**
+ * The phases of the connect.
+ */
+phases?: Array<ConnectPhase>, } | { "type": "screenshot", 
 /**
  * Image width.
  */

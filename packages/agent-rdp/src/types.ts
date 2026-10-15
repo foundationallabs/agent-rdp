@@ -28,6 +28,11 @@ export type {
   ErrorCode,
   ErrorInfo,
   AuthFailureReason,
+  ConnectPhase,
+  ConnectPhaseDetail,
+  ConnectPhaseName,
+  PhaseOutcome,
+  SelectedProtocol,
   SessionInfo,
   SessionSummary,
   MappedDrive,
@@ -64,7 +69,7 @@ export type {
 // --- SDK Convenience Types ---
 // These are higher-level types for the SDK API, not IPC.
 
-import type { AuthFailureReason, DriveMapping, ErrorCode } from './generated/index.js';
+import type { AuthFailureReason, ConnectPhase, DriveMapping, ErrorCode } from './generated/index.js';
 
 /** Options for connecting to an RDP session. */
 export interface ConnectOptions {
@@ -108,6 +113,8 @@ export interface ConnectResult {
   host: string;
   width: number;
   height: number;
+  /** The phases of the connect, in order. Absent from a daemon that predates them. */
+  phases?: ConnectPhase[];
 }
 
 /** Options for taking a screenshot. */
@@ -213,6 +220,8 @@ export class RdpError extends Error {
     message: string,
     /** Why the login failed, when known. Only set with `authentication_failed`. */
     public reason?: AuthFailureReason,
+    /** For a failed connect: its phases, ending with the one that failed. */
+    public phases?: ConnectPhase[],
   ) {
     super(message);
     this.name = 'RdpError';

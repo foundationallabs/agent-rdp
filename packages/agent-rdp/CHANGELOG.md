@@ -6,6 +6,11 @@
 ### Features
 
 * `connect` gains the opt-in `acknowledge_logon_notice` (CLI `--acknowledge-logon-notice`, SDK `acknowledgeLogonNotice`). When the server skips NLA and Windows has not confirmed the logon 5 s after the connection came up, agent-rdp presses Enter once, which dismisses a Windows pre-logon notice (the "legal notice" policy) through its default OK button, then keeps waiting until the usual 20 s deadline. Without it, such a notice holds the logon until `connect` fails as `logon_unconfirmed`. Only one press, because a second Enter on a sign-in screen could submit an empty password. The press is blind: on a host that discards the sent password and shows its sign-in prompt (the "Always prompt for password" policy), that one Enter submits an empty password, which can count as a failed logon. Off by default; with it off, `connect` behaves exactly as in 0.8.0.
+* `connect` reports its phases: `dns`, `tcp`, `rdp_negotiate`, `tls`, `rdp_connect` and, when the server skips NLA, `logon`. Each phase has its start time (`started_at_ms`, Unix ms), duration, outcome (`ok`, `failed`, `timed_out`) and an allowlisted detail: resolved addresses, the address tried, the security protocol the server selected, the server key's SPKI pin and whether it matched `server_cert_pin`, and the error code of a failed phase. Success carries them in the `connected` data and a failed connect in `error.phases`, ending with the phase that failed. SDK: `ConnectResult.phases` and `RdpError.phases`. The detail never holds a username, password or screen content.
+
+### Behavior Changes
+
+* The phases before the credentials are sent now time out: DNS after 5 s, TCP connect, RDP negotiation and the TLS handshake after 10 s each. A timeout fails the connect as `connection_failed`, never `authentication_failed`, because the server has not seen the credentials. Previously a silently dropped TCP connect waited for the OS timeout (often over a minute), and a server that stalled during negotiation or TLS held `connect` until the caller gave up.
 
 ## 0.8.0 (2026-10-09)
 
