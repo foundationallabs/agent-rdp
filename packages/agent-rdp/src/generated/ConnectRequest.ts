@@ -42,6 +42,13 @@ enable_credssp?: boolean,
  */
 server_cert_pin?: string, 
 /**
+ * When the server skips NLA and has not confirmed the login 5 s after the connection came
+ * up, press Enter once to dismiss a Windows pre-logon notice (the "legal notice" policy)
+ * and keep waiting (default: false). The press goes to whatever screen has focus: on a host
+ * that discards the sent password and shows its sign-in prompt, it submits an empty password.
+ */
+acknowledge_logon_notice: boolean, 
+/**
  * Desktop width in pixels.
  */
 width: number, 

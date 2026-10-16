@@ -235,6 +235,7 @@ export class RdpSession {
    * @param options.alternateShell Optional alternate shell to start instead of the desktop
    * @param options.enableNla Use NLA/CredSSP (default: true); false = TLS security only
    * @param options.serverCertPin Required server key, `sha256/<base64>` of its SubjectPublicKeyInfo
+   * @param options.acknowledgeLogonNotice When the server skips NLA, press Enter once at a pre-logon notice
    * @param options.width Desktop width (default: 1280)
    * @param options.height Desktop height (default: 800)
    * @param options.drives Drives to map
@@ -254,6 +255,7 @@ export class RdpSession {
       alternate_shell: options.alternateShell,
       enable_credssp: options.enableNla,
       server_cert_pin: options.serverCertPin,
+      acknowledge_logon_notice: options.acknowledgeLogonNotice ?? false,
       width: options.width ?? 1280,
       height: options.height ?? 800,
       drives: options.drives ?? [],

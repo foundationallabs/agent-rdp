@@ -91,6 +91,23 @@ fn tls_upgrade_error(error: std::io::Error) -> RdpError {
 /// SDK's 30 s default request timeout, so the connect response still reaches the caller.
 const LOGON_OUTCOME_WINDOW: Duration = Duration::from_secs(20);
 
+/// How long an NLA-off `connect()` that answers a pre-logon notice waits for the login before it
+/// presses Enter, counted from when the connection sequence finished. A login with no notice
+/// confirms within about 2 s of the credentials.
+const LOGON_NOTICE_DELAY: Duration = Duration::from_secs(5);
+
+/// When an NLA-off `connect()` gives up on the login, and when it answers a pre-logon notice.
+#[derive(Clone, Copy, Debug)]
+struct LogonTiming {
+    window: Duration,
+    notice_delay: Duration,
+}
+
+const LOGON_TIMING: LogonTiming = LogonTiming {
+    window: LOGON_OUTCOME_WINDOW,
+    notice_delay: LOGON_NOTICE_DELAY,
+};
+
 /// Whether `connect()` must wait for the server to confirm the login. Without CredSSP the server
 /// checks the password only after the connection is up. Reads what the server selected: it can
 /// pick TLS-only even when the client offered NLA.
@@ -176,6 +193,61 @@ fn logon_verdict(report: Option<LogonReport>, window: Duration) -> Result<(), Rd
     }
 }
 
+/// Waits until `deadline` for the NLA-off login result. With `notice_delay`, a login still
+/// unconfirmed that long from now gets one Enter press, the default button of a Windows pre-logon
+/// notice. Only one: on a sign-in screen, a second Enter could submit an empty password.
+async fn wait_for_logon(
+    mut logon_rx: tokio::sync::oneshot::Receiver<LogonReport>,
+    deadline: Instant,
+    notice_delay: Option<Duration>,
+    command_tx: &mpsc::Sender<SessionCommand>,
+) -> Option<LogonReport> {
+    let press_at = notice_delay
+        .map(|delay| Instant::now() + delay)
+        .filter(|at| *at < deadline);
+    if let Some(press_at) = press_at {
+        if let Some(report) = logon::logon_report_by(&mut logon_rx, press_at).await {
+            return Some(report);
+        }
+        info!("No login confirmation yet; pressing Enter once for a pre-logon notice");
+        // A closed session is left for the login wait below to report.
+        let _ = send_key_press(command_tx, "enter").await;
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    logon::await_logon_report(logon_rx, remaining).await
+}
+
+/// Send a key combination (e.g., "super+r", "ctrl+c") before or after the session exists.
+async fn send_key_press(
+    command_tx: &mpsc::Sender<SessionCommand>,
+    keys: &str,
+) -> Result<(), RdpError> {
+    let key_infos = parse_key_combination(keys).map_err(RdpError::InvalidInput)?;
+    let send = |event| async move {
+        command_tx
+            .send(SessionCommand::SendInput(vec![event]))
+            .await
+            .map_err(|_| RdpError::SessionClosed)
+    };
+
+    // Press all keys down
+    for info in &key_infos {
+        send(create_key_event(info.scancode, info.extended, false)).await?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Small delay before releasing
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Release all keys in reverse order
+    for info in key_infos.iter().rev() {
+        send(create_key_event(info.scancode, info.extended, true)).await?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    Ok(())
+}
+
 fn logon_unconfirmed_after(window: Duration) -> RdpError {
     warn!("No login confirmation from the server within {window:?}; ending the session");
     RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed)
@@ -200,6 +272,10 @@ pub struct RdpConfig {
     pub automation_dvc_state: Option<SharedDvcState>,
     /// Required server key. Without one, any certificate is accepted.
     pub server_cert_pin: Option<CertPin>,
+    /// When the server skips NLA: press Enter once when the login is still unconfirmed [`LOGON_NOTICE_DELAY`]
+    /// after the connection came up, to dismiss a Windows pre-logon notice (the "legal notice"
+    /// policy), which holds the login until someone presses OK.
+    pub acknowledge_logon_notice: bool,
 }
 
 use crate::automation::DvcCommandReceiver;
@@ -299,15 +375,19 @@ impl RdpSession {
         config: RdpConfig,
         disconnect_notify: Option<DisconnectNotify>,
     ) -> Result<Self, RdpError> {
-        Self::connect_within(config, disconnect_notify, LOGON_OUTCOME_WINDOW).await
+        Self::connect_within(config, disconnect_notify, LOGON_TIMING).await
     }
 
-    /// [`Self::connect`] with the NLA-off logon window as a parameter.
+    /// [`Self::connect`] with the NLA-off logon timing as a parameter.
     async fn connect_within(
         config: RdpConfig,
         disconnect_notify: Option<DisconnectNotify>,
-        logon_window: Duration,
+        logon_timing: LogonTiming,
     ) -> Result<Self, RdpError> {
+        let logon_window = logon_timing.window;
+        let notice_delay = config
+            .acknowledge_logon_notice
+            .then_some(logon_timing.notice_delay);
         info!("Connecting to {}:{}", config.host, config.port);
 
         let connector_config = build_connector_config(&config);
@@ -485,8 +565,7 @@ impl RdpSession {
         });
 
         if let Some((logon_rx, deadline)) = logon_rx {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let report = logon::await_logon_report(logon_rx, remaining).await;
+            let report = wait_for_logon(logon_rx, deadline, notice_delay, &command_tx).await;
             if let Err(error) = logon_verdict(report, logon_window) {
                 // Leave no session sitting at the Windows logon screen. A graceful shutdown does
                 // not report a drop to the daemon, and is a no-op when the session already ended.
@@ -558,29 +637,7 @@ impl RdpSession {
 
     /// Send a key combination (e.g., "super+r", "ctrl+c").
     pub async fn send_key_press(&self, keys: &str) -> Result<(), RdpError> {
-        use std::time::Duration;
-
-        let key_infos = parse_key_combination(keys)
-            .map_err(|e| RdpError::InvalidInput(e))?;
-
-        // Press all keys down
-        for info in &key_infos {
-            let event = create_key_event(info.scancode, info.extended, false);
-            self.send_input(vec![event]).await?;
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        // Small delay before releasing
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Release all keys in reverse order
-        for info in key_infos.iter().rev() {
-            let event = create_key_event(info.scancode, info.extended, true);
-            self.send_input(vec![event]).await?;
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        Ok(())
+        send_key_press(&self.command_tx, keys).await
     }
 
     /// Send text input as Unicode characters.
@@ -1103,6 +1160,7 @@ mod tests {
             drives: Vec::new(),
             automation_dvc_state: None,
             server_cert_pin: None,
+            acknowledge_logon_notice: false,
         }
     }
 

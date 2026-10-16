@@ -54,6 +54,7 @@ fn build_connect_request(
         // Unset keeps the daemon default (NLA on)
         enable_credssp: args.no_nla.then_some(false),
         server_cert_pin: args.server_cert_pin,
+        acknowledge_logon_notice: args.acknowledge_logon_notice,
         width: args.width,
         height: args.height,
         drives,
@@ -210,6 +211,12 @@ mod tests {
     #[test]
     fn enable_credssp_stays_unset_without_no_nla() {
         assert_eq!(request_for(&[]).enable_credssp, None);
+    }
+
+    #[test]
+    fn acknowledge_logon_notice_is_off_unless_asked() {
+        assert!(!request_for(&[]).acknowledge_logon_notice);
+        assert!(request_for(&["--acknowledge-logon-notice"]).acknowledge_logon_notice);
     }
 
     #[test]
