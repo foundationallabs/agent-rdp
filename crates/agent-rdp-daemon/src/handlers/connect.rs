@@ -8,22 +8,37 @@ use tracing::{info, warn};
 
 use crate::automation::{AutomationBootstrap, SharedAutomationState, SharedDvcState};
 use crate::daemon::{ClipboardChangedRx, SharedWsHandle};
-use crate::rdp_session::{DisconnectNotify, RdpConfig, RdpError, RdpSession};
+use crate::rdp_session::{ConnectTrace, DisconnectNotify, RdpConfig, RdpError, RdpSession};
 use crate::tls::CertPin;
 use crate::ws_server::{get_stream_fps, WsServer, WsServerConfig};
 
-/// The response for a failed connect. Only a refused or unconfirmed login is
-/// `authentication_failed`; the session manager retries every other failure.
-fn connect_error_response(error: &RdpError) -> Response {
-    match error {
+/// The response for a failed connect, carrying its phases and where the credentials left. See
+/// [`RdpError::connect_error_code`].
+fn connect_error_response(error: &RdpError, trace: ConnectTrace) -> Response {
+    let mut response = match error {
         RdpError::AuthenticationFailed(reason) => {
             Response::authentication_failed(Some(*reason), error.to_string())
         }
-        RdpError::CertificateMismatch(_) => {
-            Response::error(ErrorCode::CertificateMismatch, error.to_string())
-        }
-        _ => Response::error(ErrorCode::ConnectionFailed, error.to_string()),
+        _ => Response::error(error.connect_error_code(), error.to_string()),
+    };
+    if let Some(info) = response.error.as_mut() {
+        let (phases, credential_boundary) = trace.into_parts();
+        info.phases = Some(phases);
+        info.credential_boundary = Some(credential_boundary);
     }
+    response
+}
+
+/// The response for a connect that succeeded, carrying its phases and where the credentials left.
+fn connected_response(host: String, width: u16, height: u16, trace: ConnectTrace) -> Response {
+    let (phases, credential_boundary) = trace.into_parts();
+    Response::success(ResponseData::Connected {
+        host,
+        width,
+        height,
+        phases: Some(phases),
+        credential_boundary: Some(credential_boundary),
+    })
 }
 
 /// Parse the request's server certificate pin, if it has one.
@@ -150,9 +165,10 @@ pub async fn handle(
     let config = build_rdp_config(params, drives, automation_dvc_state, server_cert_pin);
 
     // Attempt connection
-    let rdp = match RdpSession::connect(config, Some(disconnect_notify)).await {
+    let mut trace = ConnectTrace::default();
+    let rdp = match RdpSession::connect(config, Some(disconnect_notify), &mut trace).await {
         Ok(rdp) => rdp,
-        Err(e) => return connect_error_response(&e),
+        Err(e) => return connect_error_response(&e, trace),
     };
 
     let host = rdp.host();
@@ -231,11 +247,7 @@ pub async fn handle(
         }
     }
 
-    Response::success(ResponseData::Connected {
-        host,
-        width,
-        height,
-    })
+    connected_response(host, width, height, trace)
 }
 
 /// Handle a disconnect request.
@@ -282,15 +294,65 @@ pub async fn handle_disconnect(
 
 #[cfg(test)]
 mod tests {
-    use agent_rdp_protocol::AuthFailureReason;
+    use agent_rdp_protocol::{
+        AuthFailureReason, ConnectPhase, ConnectPhaseName, CredentialBoundary, PhaseOutcome,
+    };
 
     use super::*;
 
+    fn phase(phase: ConnectPhaseName, outcome: PhaseOutcome) -> ConnectPhase {
+        ConnectPhase {
+            phase,
+            started_at_ms: 1_760_000_000_000,
+            ms: 7,
+            outcome,
+            detail: None,
+        }
+    }
+
+    fn logon_trace(last: PhaseOutcome) -> (ConnectTrace, Vec<ConnectPhase>) {
+        let phases = vec![
+            phase(ConnectPhaseName::RdpConnect, PhaseOutcome::Ok),
+            phase(ConnectPhaseName::Logon, last),
+        ];
+        let trace = ConnectTrace::recorded(phases.clone(), CredentialBoundary::Logon);
+        (trace, phases)
+    }
+
+    #[test]
+    fn failed_connect_carries_its_phases_and_credential_boundary() {
+        let (trace, phases) = logon_trace(PhaseOutcome::Failed);
+        let response = connect_error_response(
+            &RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed),
+            trace,
+        );
+        let error = response.error.unwrap();
+        assert_eq!(error.phases, Some(phases));
+        assert_eq!(error.credential_boundary, Some(CredentialBoundary::Logon));
+    }
+
+    #[test]
+    fn successful_connect_carries_its_phases_and_credential_boundary() {
+        let (trace, phases) = logon_trace(PhaseOutcome::Ok);
+        let response = connected_response("10.0.0.5".to_string(), 1920, 1080, trace);
+        let Some(ResponseData::Connected {
+            phases: reported,
+            credential_boundary,
+            ..
+        }) = response.data
+        else {
+            panic!("expected connected data");
+        };
+        assert_eq!(reported, Some(phases));
+        assert_eq!(credential_boundary, Some(CredentialBoundary::Logon));
+    }
+
     #[test]
     fn refused_login_is_authentication_failed_with_reason() {
-        let response = connect_error_response(&RdpError::AuthenticationFailed(
-            AuthFailureReason::AccountLockedOut,
-        ));
+        let response = connect_error_response(
+            &RdpError::AuthenticationFailed(AuthFailureReason::AccountLockedOut),
+            ConnectTrace::default(),
+        );
         let error = response.error.unwrap();
         assert_eq!(error.code, ErrorCode::AuthenticationFailed);
         assert_eq!(error.reason, Some(AuthFailureReason::AccountLockedOut));
@@ -302,7 +364,9 @@ mod tests {
             RdpError::ConnectionFailed("refused".to_string()),
             RdpError::TlsError("handshake".to_string()),
         ] {
-            let error = connect_error_response(&error).error.unwrap();
+            let error = connect_error_response(&error, ConnectTrace::default())
+                .error
+                .unwrap();
             assert_eq!(error.code, ErrorCode::ConnectionFailed);
             assert_eq!(error.reason, None);
         }
@@ -310,9 +374,12 @@ mod tests {
 
     #[test]
     fn pin_mismatch_is_certificate_mismatch() {
-        let error = connect_error_response(&RdpError::CertificateMismatch("key".to_string()))
-            .error
-            .unwrap();
+        let error = connect_error_response(
+            &RdpError::CertificateMismatch("key".to_string()),
+            ConnectTrace::default(),
+        )
+        .error
+        .unwrap();
         assert_eq!(error.code, ErrorCode::CertificateMismatch);
         assert_eq!(error.reason, None);
     }

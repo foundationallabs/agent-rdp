@@ -46,7 +46,12 @@ impl Output {
             ResponseData::Ok => {
                 println!("OK");
             }
-            ResponseData::Connected { host, width, height } => {
+            ResponseData::Connected {
+                host,
+                width,
+                height,
+                ..
+            } => {
                 println!("Connected to {} ({}x{})", host, width, height);
             }
             ResponseData::Screenshot { width, height, format, .. } => {
