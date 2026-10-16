@@ -3,7 +3,7 @@
 use crate::automation::{
     AccessibilitySnapshot, AutomationStatus, ClickResult, ElementValue, RunResult, WindowInfo,
 };
-use crate::connect_trace::ConnectPhase;
+use crate::connect_trace::{ConnectPhase, CredentialBoundary};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ts_rs::TS;
@@ -55,6 +55,7 @@ impl Response {
                 message: message.into(),
                 reason: None,
                 phases: None,
+                credential_boundary: None,
             }),
         }
     }
@@ -72,6 +73,7 @@ impl Response {
                 message: message.into(),
                 reason,
                 phases: None,
+                credential_boundary: None,
             }),
         }
     }
@@ -97,6 +99,10 @@ pub enum ResponseData {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         phases: Option<Vec<ConnectPhase>>,
+        /// Where the credentials left: `rdp_connect` with NLA on, `logon` with NLA off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        credential_boundary: Option<CredentialBoundary>,
     },
 
     /// Screenshot data.
@@ -278,6 +284,11 @@ pub struct ErrorInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub phases: Option<Vec<ConnectPhase>>,
+    /// For a failed connect: the first phase in which the credentials may have reached the
+    /// server, or `none` when the connect cannot have cost a login attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub credential_boundary: Option<CredentialBoundary>,
 }
 
 /// Why a login failed.
@@ -426,6 +437,7 @@ mod tests {
             width: 1920,
             height: 1080,
             phases: None,
+            credential_boundary: None,
         });
 
         let json = serde_json::to_string(&resp).unwrap();

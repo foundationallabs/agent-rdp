@@ -14,6 +14,7 @@ export type { ConnectPhaseDetail } from './ConnectPhaseDetail.js';
 export type { ConnectPhaseName } from './ConnectPhaseName.js';
 export type { ConnectRequest } from './ConnectRequest.js';
 export type { ConnectionState } from './ConnectionState.js';
+export type { CredentialBoundary } from './CredentialBoundary.js';
 export type { DriveMapping } from './DriveMapping.js';
 export type { DriveRequest } from './DriveRequest.js';
 export type { ElementBounds } from './ElementBounds.js';

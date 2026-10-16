@@ -37,9 +37,26 @@ pub enum ConnectPhaseName {
     RdpNegotiate,
     /// The TLS handshake.
     Tls,
-    /// The rest of the connection sequence, including CredSSP when the server selected NLA.
+    /// The rest of the connection sequence, including CredSSP when the server selected NLA. NLA off:
+    /// up to the Client Info PDU, which carries the credentials.
     RdpConnect,
-    /// NLA off: waiting for the server to confirm the login.
+    /// NLA off: from the Client Info PDU until the server confirms the login.
+    Logon,
+}
+
+/// The first phase in which the credentials may have reached the server. A failed connect with
+/// `none` cannot have cost a login attempt; any other boundary may have.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../packages/agent-rdp/src/generated/")]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialBoundary {
+    /// The connect ended before the credentials left.
+    #[default]
+    None,
+    /// NLA on: CredSSP sends the credentials during `rdp_connect`, at a point agent-rdp cannot
+    /// observe, so the whole phase counts.
+    RdpConnect,
+    /// NLA off: the Client Info PDU carried the credentials, at the start of `logon`.
     Logon,
 }
 
@@ -149,5 +166,26 @@ mod tests {
         })
         .unwrap();
         assert!(json.get("detail").is_none());
+    }
+
+    #[test]
+    fn credential_boundary_wire_names() {
+        for (boundary, name) in [
+            (CredentialBoundary::None, "none"),
+            (CredentialBoundary::RdpConnect, "rdp_connect"),
+            (CredentialBoundary::Logon, "logon"),
+        ] {
+            assert_eq!(serde_json::to_value(boundary).unwrap(), name);
+        }
+        // A boundary names the phase it falls in.
+        for (boundary, phase) in [
+            (CredentialBoundary::RdpConnect, ConnectPhaseName::RdpConnect),
+            (CredentialBoundary::Logon, ConnectPhaseName::Logon),
+        ] {
+            assert_eq!(
+                serde_json::to_value(boundary).unwrap(),
+                serde_json::to_value(phase).unwrap()
+            );
+        }
     }
 }

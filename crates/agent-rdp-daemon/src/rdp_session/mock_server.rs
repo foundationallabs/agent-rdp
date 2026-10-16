@@ -43,7 +43,8 @@ use super::{
 };
 use crate::tls::CertPin;
 use agent_rdp_protocol::{
-    AuthFailureReason, ConnectPhase, ConnectPhaseName, ErrorCode, PhaseOutcome, SelectedProtocol,
+    AuthFailureReason, ConnectPhase, ConnectPhaseName, CredentialBoundary, ErrorCode, PhaseOutcome,
+    SelectedProtocol,
 };
 
 const CERT: &[u8] = include_bytes!("../../testdata/tls/server-a.crt.der");
@@ -58,6 +59,8 @@ const SHARE_ID: u32 = 0x0001_03ea;
 enum Stop {
     /// After the Attach User Request, before the client can send the Client Info PDU.
     BeforeClientInfo,
+    /// After the Attach User Request, the server goes silent until the client closes.
+    StallBeforeClientInfo,
     /// After the Attach User Confirm: the server reads whatever arrives until the client closes.
     ReadAfterAttach,
     /// Right after the Client Info PDU arrived.
@@ -110,6 +113,8 @@ struct Script {
     /// How long the server waits after the Client Info PDU before it answers.
     license_delay: Duration,
     alternate_shell: Option<String>,
+    /// A shorter NLA-off `rdp_connect` timeout through `connect_within`; `None` runs the production one.
+    client_info_timeout: Option<Duration>,
     /// A shorter logon window through `connect_within`; `None` runs the production window.
     logon_window: Option<Duration>,
     /// A shorter notice delay through `connect_within`; `None` runs the production delay.
@@ -128,6 +133,7 @@ impl Script {
             connect_delay: Duration::ZERO,
             license_delay: Duration::ZERO,
             alternate_shell: None,
+            client_info_timeout: None,
             logon_window: None,
             notice_delay: None,
             acknowledge_logon_notice: false,
@@ -148,6 +154,7 @@ struct Run {
     enter_presses: usize,
     /// The phases `connect` recorded.
     phases: Vec<ConnectPhase>,
+    credential_boundary: CredentialBoundary,
 }
 
 /// What the server saw of one connect.
@@ -182,6 +189,12 @@ async fn run(script: Script) -> Run {
     let mut config = loopback_config(port, script.offer_nla, script.alternate_shell.as_deref());
     config.acknowledge_logon_notice = script.acknowledge_logon_notice;
     let timing = ConnectTiming {
+        phases: PhaseTimeouts {
+            client_info: script
+                .client_info_timeout
+                .unwrap_or(CONNECT_TIMING.phases.client_info),
+            ..CONNECT_TIMING.phases
+        },
         logon_window: script.logon_window.unwrap_or(CONNECT_TIMING.logon_window),
         notice_delay: script.notice_delay.unwrap_or(CONNECT_TIMING.notice_delay),
         ..CONNECT_TIMING
@@ -193,6 +206,7 @@ async fn run(script: Script) -> Run {
         .await
         .expect("connect did not finish");
     let ended = Instant::now();
+    let (phases, credential_boundary) = trace.into_parts();
     // Dropping the session closes the connection, which a confirming server waits for.
     let result = result.map(drop);
     let Served {
@@ -210,7 +224,8 @@ async fn run(script: Script) -> Run {
         since_credentials: credentials_at.map(|at| ended - at),
         client_gcc,
         enter_presses,
-        phases: trace.into_phases(),
+        phases,
+        credential_boundary,
     }
 }
 
@@ -252,8 +267,11 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Served {
     .await;
     read_frame(&mut tls).await; // Erect Domain Request
     read_frame(&mut tls).await; // Attach User Request
-    if let Stop::BeforeClientInfo = stop {
-        finish(tls, end).await;
+    if let Stop::BeforeClientInfo | Stop::StallBeforeClientInfo = stop {
+        match stop {
+            Stop::BeforeClientInfo => finish(tls, end).await,
+            _ => drop(read_until_closed(&mut tls).await),
+        }
         return Served {
             client_gcc,
             credentials_at: None,
@@ -353,6 +371,7 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Served {
             presses + count_enter_until_closed(&mut tls).await
         }
         Stop::BeforeClientInfo
+        | Stop::StallBeforeClientInfo
         | Stop::ReadAfterAttach
         | Stop::AfterClientInfo
         | Stop::StallAfterClientInfo => unreachable!(),
@@ -567,6 +586,7 @@ async fn a_close_before_the_credentials_is_a_connection_failure() {
     for end in [End::Close, End::Reset] {
         let run = run(Script::new(Stop::BeforeClientInfo, end)).await;
         assert!(!run.credentials_received);
+        assert_eq!(run.credential_boundary, CredentialBoundary::None);
         assert!(
             matches!(run.error(), RdpError::ConnectionFailed(_)),
             "{end:?}: got {:?}",
@@ -597,6 +617,12 @@ async fn a_close_right_after_the_credentials_is_an_unconfirmed_login() {
         let run = run(Script::new(Stop::AfterClientInfo, end)).await;
         assert!(run.credentials_received);
         assert_unconfirmed(&run);
+        assert_eq!(run.credential_boundary, CredentialBoundary::Logon);
+        let last = run.phases.last().unwrap();
+        assert_eq!(
+            (last.phase, last.outcome),
+            (ConnectPhaseName::Logon, PhaseOutcome::Failed)
+        );
     }
 }
 
@@ -646,6 +672,28 @@ async fn the_logon_window_counts_from_the_credentials_not_the_connect() {
             && since_credentials < logon_window + license_delay / 2,
         "ended {since_credentials:?} after the credentials"
     );
+    // The phases split at the credentials too: `rdp_connect` holds the delay before them, and
+    // `logon` the delay after them and the rest of the window.
+    let [.., rdp_connect, logon] = run.phases.as_slice() else {
+        panic!("phases {:?}", names(&run.phases));
+    };
+    assert_eq!(
+        (rdp_connect.phase, logon.phase),
+        (ConnectPhaseName::RdpConnect, ConnectPhaseName::Logon)
+    );
+    let ms = |duration: Duration| u32::try_from(duration.as_millis()).unwrap();
+    assert!(
+        rdp_connect.ms >= ms(connect_delay)
+            && rdp_connect.ms < ms(connect_delay + license_delay / 2),
+        "rdp_connect took {} ms",
+        rdp_connect.ms
+    );
+    assert!(
+        logon.ms + 100 >= ms(logon_window),
+        "logon took {} ms",
+        logon.ms
+    );
+    assert!(logon.started_at_ms + 1 >= rdp_connect.started_at_ms + u64::from(rdp_connect.ms));
 }
 
 #[tokio::test]
@@ -782,7 +830,8 @@ async fn nla_on_still_runs_credssp_first() {
     // A CredSSP TSRequest is a DER SEQUENCE; an MCS Connect Initial would start a TPKT frame (3).
     assert_eq!(server.await.unwrap(), 0x30);
     // CredSSP runs inside the connection sequence; there is no NLA-off login wait.
-    let phases = trace.into_phases();
+    let (phases, credential_boundary) = trace.into_parts();
+    assert_eq!(credential_boundary, CredentialBoundary::RdpConnect);
     assert_eq!(
         phases[2].detail.as_ref().unwrap().selected_protocol,
         Some(SelectedProtocol::Hybrid)
@@ -797,6 +846,64 @@ async fn nla_on_still_runs_credssp_first() {
         ),
         "an NLA-on end is never an unconfirmed login"
     );
+}
+
+#[tokio::test]
+async fn an_nla_on_stall_fails_the_login_closed() {
+    // CredSSP may have sent the credentials before the stall, so the end cannot be retryable.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut tcp, _) = listener.accept().await.unwrap();
+        read_frame(&mut tcp).await; // X.224 Connection Request
+        write_frame(
+            &mut tcp,
+            &X224(ConnectionConfirm::Response {
+                flags: ResponseFlags::empty(),
+                protocol: SecurityProtocol::HYBRID,
+            }),
+        )
+        .await;
+        let mut tls = tls_acceptor().accept(tcp).await.unwrap();
+        read_until_closed(&mut tls).await;
+    });
+
+    let logon_window = Duration::from_millis(300);
+    let timing = ConnectTiming {
+        logon_window,
+        ..CONNECT_TIMING
+    };
+    let mut trace = ConnectTrace::default();
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        RdpSession::connect_within(loopback_config(port, true, None), None, timing, &mut trace),
+    )
+    .await
+    .expect("connect did not finish");
+    assert!(
+        matches!(
+            result,
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonUnconfirmed
+            ))
+        ),
+        "got {:?}",
+        result.err()
+    );
+    let (phases, credential_boundary) = trace.into_parts();
+    assert_eq!(credential_boundary, CredentialBoundary::RdpConnect);
+    let last = phases.last().unwrap();
+    assert_eq!(
+        (last.phase, last.outcome),
+        (ConnectPhaseName::RdpConnect, PhaseOutcome::TimedOut)
+    );
+    let detail = last.detail.as_ref().unwrap();
+    assert_eq!(detail.error_code, Some(ErrorCode::AuthenticationFailed));
+    assert_eq!(detail.timeout_ms, Some(300));
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("server did not finish")
+        .unwrap();
 }
 
 #[tokio::test]
@@ -927,6 +1034,7 @@ async fn a_confirmed_login_reports_every_phase_in_order() {
     assert_eq!(detail(3).cert_pin_matched, None, "no pin was set");
     assert_eq!(run.phases[4].detail, None);
     assert_eq!(run.phases[5].detail, None);
+    assert_eq!(run.credential_boundary, CredentialBoundary::Logon);
 }
 
 #[tokio::test]
@@ -961,6 +1069,36 @@ async fn a_failure_before_the_credentials_ends_with_a_failed_connection_phase() 
     let last = run.phases.last().unwrap();
     assert_eq!((last.phase, last.outcome), (ConnectPhaseName::RdpConnect, PhaseOutcome::Failed));
     assert_eq!(last.detail.as_ref().unwrap().error_code, Some(ErrorCode::ConnectionFailed));
+}
+
+#[tokio::test]
+async fn a_stall_before_the_credentials_times_out_as_a_connection_failure() {
+    let client_info_timeout = Duration::from_millis(300);
+    let run = run(Script {
+        client_info_timeout: Some(client_info_timeout),
+        ..Script::new(Stop::StallBeforeClientInfo, End::Close)
+    })
+    .await;
+    assert!(!run.credentials_received);
+    assert!(
+        matches!(run.error(), RdpError::ConnectionFailed(_)),
+        "got {:?}",
+        run.error()
+    );
+    assert_eq!(run.credential_boundary, CredentialBoundary::None);
+    let last = run.phases.last().unwrap();
+    assert_eq!(
+        (last.phase, last.outcome),
+        (ConnectPhaseName::RdpConnect, PhaseOutcome::TimedOut)
+    );
+    let detail = last.detail.as_ref().unwrap();
+    assert_eq!(detail.error_code, Some(ErrorCode::ConnectionFailed));
+    assert_eq!(detail.timeout_ms, Some(300));
+    assert!(
+        run.elapsed < Duration::from_secs(5),
+        "took {:?}",
+        run.elapsed
+    );
 }
 
 /// How far a stalling server follows the connection before it goes silent.
@@ -1012,6 +1150,7 @@ async fn connect_partway(
             tcp: Duration::from_secs(1),
             negotiate: Duration::from_millis(300),
             tls: Duration::from_millis(300),
+            client_info: Duration::from_millis(300),
         },
         logon_window: Duration::from_secs(1),
         ..CONNECT_TIMING
@@ -1023,7 +1162,9 @@ async fn connect_partway(
     )
     .await
     .expect("connect did not finish");
-    let phases = trace.into_phases();
+    let (phases, credential_boundary) = trace.into_parts();
+    // Every partway server stops before the credentials.
+    assert_eq!(credential_boundary, CredentialBoundary::None);
     if result.is_err() {
         tokio::time::timeout(Duration::from_secs(5), server)
             .await

@@ -12,7 +12,8 @@ use crate::rdp_session::{ConnectTrace, DisconnectNotify, RdpConfig, RdpError, Rd
 use crate::tls::CertPin;
 use crate::ws_server::{get_stream_fps, WsServer, WsServerConfig};
 
-/// The response for a failed connect, carrying its phases. See [`RdpError::connect_error_code`].
+/// The response for a failed connect, carrying its phases and where the credentials left. See
+/// [`RdpError::connect_error_code`].
 fn connect_error_response(error: &RdpError, trace: ConnectTrace) -> Response {
     let mut response = match error {
         RdpError::AuthenticationFailed(reason) => {
@@ -21,7 +22,9 @@ fn connect_error_response(error: &RdpError, trace: ConnectTrace) -> Response {
         _ => Response::error(error.connect_error_code(), error.to_string()),
     };
     if let Some(info) = response.error.as_mut() {
-        info.phases = Some(trace.into_phases());
+        let (phases, credential_boundary) = trace.into_parts();
+        info.phases = Some(phases);
+        info.credential_boundary = Some(credential_boundary);
     }
     response
 }
@@ -232,11 +235,13 @@ pub async fn handle(
         }
     }
 
+    let (phases, credential_boundary) = trace.into_parts();
     Response::success(ResponseData::Connected {
         host,
         width,
         height,
-        phases: Some(trace.into_phases()),
+        phases: Some(phases),
+        credential_boundary: Some(credential_boundary),
     })
 }
 

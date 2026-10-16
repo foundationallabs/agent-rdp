@@ -6,7 +6,8 @@ use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_rdp_protocol::{
-    ConnectPhase, ConnectPhaseDetail, ConnectPhaseName, PhaseOutcome, SelectedProtocol,
+    ConnectPhase, ConnectPhaseDetail, ConnectPhaseName, CredentialBoundary, PhaseOutcome,
+    SelectedProtocol,
 };
 use ironrdp::connector::{ClientConnector, ClientConnectorState};
 use ironrdp::pdu::nego::SecurityProtocol;
@@ -24,6 +25,9 @@ pub(super) struct PhaseTimeouts {
     pub tcp: Duration,
     pub negotiate: Duration,
     pub tls: Duration,
+    /// NLA off: `rdp_connect`, which ends when the Client Info PDU carries the credentials. NLA on,
+    /// CredSSP sends them inside `rdp_connect`, so `ConnectTiming::logon_window` bounds it instead.
+    pub client_info: Duration,
 }
 
 pub(super) const PHASE_TIMEOUTS: PhaseTimeouts = PhaseTimeouts {
@@ -31,12 +35,28 @@ pub(super) const PHASE_TIMEOUTS: PhaseTimeouts = PhaseTimeouts {
     tcp: Duration::from_secs(10),
     negotiate: Duration::from_secs(10),
     tls: Duration::from_secs(10),
+    client_info: Duration::from_secs(10),
 };
 
-/// The phases of one connect, in the order they ran.
+/// Runs `work` until `deadline`, which falls `limit` after the phase started. Returns the result
+/// and, when the deadline passed first, `limit` to record the phase as timed out.
+pub(super) async fn timed<T>(
+    deadline: Instant,
+    limit: Duration,
+    on_timeout: impl FnOnce() -> RdpError,
+    work: impl Future<Output = Result<T, RdpError>>,
+) -> (Result<T, RdpError>, Option<Duration>) {
+    match tokio::time::timeout_at(deadline, work).await {
+        Ok(result) => (result, None),
+        Err(_) => (Err(on_timeout()), Some(limit)),
+    }
+}
+
+/// The phases of one connect, in the order they ran, and where the credentials left.
 #[derive(Debug, Default)]
 pub struct ConnectTrace {
     phases: Vec<ConnectPhase>,
+    credential_boundary: CredentialBoundary,
 }
 
 /// When a phase started.
@@ -52,33 +72,51 @@ impl PhaseStart {
             wall: SystemTime::now(),
         }
     }
+
+    /// `after` from the start of the phase.
+    pub(super) fn deadline(&self, after: Duration) -> Instant {
+        self.at + after
+    }
 }
 
 impl ConnectTrace {
-    pub fn into_phases(self) -> Vec<ConnectPhase> {
-        self.phases
+    pub fn into_parts(self) -> (Vec<ConnectPhase>, CredentialBoundary) {
+        (self.phases, self.credential_boundary)
     }
 
-    /// Runs one phase and records it. Past `timeout`, the phase times out as a connection failure.
+    /// Marks the phase in which the credentials may reach the server, before it starts.
+    pub(super) fn credentials_leave_in(&mut self, boundary: CredentialBoundary) {
+        self.credential_boundary = boundary;
+    }
+
+    /// Runs one phase before the credentials and records it. Past `timeout`, the phase times out
+    /// as a connection failure.
     pub(super) async fn run<T>(
         &mut self,
         phase: ConnectPhaseName,
         timeout: Option<Duration>,
         work: impl Future<Output = Result<T, RdpError>>,
     ) -> Result<T, RdpError> {
+        let timeout = timeout.map(|limit| {
+            let error = move || {
+                RdpError::ConnectionFailed(format!("{} timed out after {limit:?}", label(phase)))
+            };
+            (limit, error)
+        });
+        self.run_until(phase, timeout, work).await
+    }
+
+    /// Runs one phase and records it. Past the timeout's limit, the phase fails with its error.
+    pub(super) async fn run_until<T>(
+        &mut self,
+        phase: ConnectPhaseName,
+        timeout: Option<(Duration, impl FnOnce() -> RdpError)>,
+        work: impl Future<Output = Result<T, RdpError>>,
+    ) -> Result<T, RdpError> {
         let start = PhaseStart::now();
         let (result, timed_out_after) = match timeout {
             None => (work.await, None),
-            Some(limit) => match tokio::time::timeout(limit, work).await {
-                Ok(result) => (result, None),
-                Err(_) => (
-                    Err(RdpError::ConnectionFailed(format!(
-                        "{} timed out after {limit:?}",
-                        label(phase)
-                    ))),
-                    Some(limit),
-                ),
-            },
+            Some((limit, error)) => timed(start.deadline(limit), limit, error, work).await,
         };
         self.finish(phase, start, &result, timed_out_after);
         result
@@ -220,7 +258,7 @@ mod tests {
             error.to_string(),
             "Connection failed: TCP connect timed out after 50ms"
         );
-        let [phase] = trace.into_phases().try_into().unwrap();
+        let [phase] = trace.into_parts().0.try_into().unwrap();
         assert_eq!(phase.phase, ConnectPhaseName::Tcp);
         assert_eq!(phase.outcome, PhaseOutcome::TimedOut);
         assert!(phase.ms >= 50, "took {} ms", phase.ms);
@@ -239,7 +277,7 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        let [phase] = trace.into_phases().try_into().unwrap();
+        let [phase] = trace.into_parts().0.try_into().unwrap();
         assert_eq!(phase.outcome, PhaseOutcome::Failed);
         let detail = phase.detail.unwrap();
         assert_eq!(detail.error_code, Some(ErrorCode::CertificateMismatch));
@@ -256,7 +294,7 @@ mod tests {
         assert_eq!(trace.phases[0].detail, None);
         trace.detail().addresses = Some(addrs.iter().map(|a| a.ip().to_string()).collect());
 
-        let [phase] = trace.into_phases().try_into().unwrap();
+        let [phase] = trace.into_parts().0.try_into().unwrap();
         assert_eq!(phase.outcome, PhaseOutcome::Ok);
         assert_eq!(
             phase.detail.unwrap().addresses,

@@ -275,6 +275,7 @@ export class RdpSession {
       width: data.width,
       height: data.height,
       phases: data.phases,
+      credentialBoundary: data.credential_boundary,
     };
   }
 
@@ -415,6 +416,7 @@ export class RdpSession {
         response.error?.message ?? 'Unknown error',
         response.error?.reason,
         response.error?.phases,
+        response.error?.credential_boundary,
       );
     }
 
