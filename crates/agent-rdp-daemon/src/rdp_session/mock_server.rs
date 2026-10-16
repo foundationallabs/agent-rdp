@@ -364,14 +364,22 @@ async fn serve(mut tcp: TcpStream, script: Script) -> Served {
 }
 
 fn session_continue() -> InfoData {
+    logon_error(
+        LogonErrorNotificationType::SessionContinue,
+        LogonErrorNotificationDataErrorCode::FailedOther,
+    )
+}
+
+fn logon_error(
+    error_type: LogonErrorNotificationType,
+    code: LogonErrorNotificationDataErrorCode,
+) -> InfoData {
     InfoData::LogonExtended(LogonInfoExtended {
         present_fields_flags: LogonExFlags::LOGON_ERRORS,
         auto_reconnect: None,
         errors_info: Some(LogonErrorsInfo {
-            error_type: LogonErrorNotificationType::SessionContinue,
-            error_data: LogonErrorNotificationData::ErrorCode(
-                LogonErrorNotificationDataErrorCode::FailedOther,
-            ),
+            error_type,
+            error_data: LogonErrorNotificationData::ErrorCode(code),
         }),
     })
 }
@@ -821,7 +829,36 @@ async fn an_unanswered_notice_gets_one_enter_then_fails_closed() {
     .await;
     assert_unconfirmed(&run);
     assert_eq!(run.enter_presses, 1);
-    assert!(run.elapsed >= logon_window, "took {:?}", run.elapsed);
+    // The press does not extend the deadline.
+    assert!(
+        run.elapsed >= logon_window && run.elapsed < logon_window + Duration::from_millis(500),
+        "took {:?}",
+        run.elapsed
+    );
+}
+
+#[tokio::test]
+async fn a_login_refused_after_the_enter_keeps_its_reason() {
+    let run = run(Script {
+        acknowledge_logon_notice: true,
+        notice_delay: Some(Duration::from_millis(200)),
+        logon_window: Some(Duration::from_secs(5)),
+        confirmation: logon_error(
+            LogonErrorNotificationType::SessionTerminate,
+            LogonErrorNotificationDataErrorCode::FailedBadPassword,
+        ),
+        ..Script::new(Stop::ConfirmOnEnter, End::Close)
+    })
+    .await;
+    assert!(
+        matches!(
+            run.error(),
+            RdpError::AuthenticationFailed(AuthFailureReason::LogonFailedBadPassword)
+        ),
+        "got {:?}",
+        run.error()
+    );
+    assert_eq!(run.enter_presses, 1);
 }
 
 #[tokio::test]

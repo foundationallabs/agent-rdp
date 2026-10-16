@@ -91,7 +91,9 @@ export interface ConnectOptions {
   /**
    * When the server skips NLA (as with `enableNla: false`): press Enter once if it has not
    * confirmed the login 5 s after connecting, to dismiss a Windows pre-logon notice (the "legal notice" policy), which
-   * otherwise holds the login until it fails as `logon_unconfirmed` (default: false).
+   * otherwise holds the login until it fails as `logon_unconfirmed` (default: false). The press
+   * goes to whatever screen has focus: on a host that discards the sent password and shows its
+   * sign-in prompt, it submits an empty password.
    */
   acknowledgeLogonNotice?: boolean;
   width?: number;
