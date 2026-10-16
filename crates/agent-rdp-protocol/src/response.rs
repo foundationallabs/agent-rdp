@@ -285,7 +285,8 @@ pub struct ErrorInfo {
     #[ts(optional)]
     pub phases: Option<Vec<ConnectPhase>>,
     /// For a failed connect: the first phase in which the credentials may have reached the
-    /// server, or `none` when the connect cannot have cost a login attempt.
+    /// server, or `none` when the connect cannot have cost a login attempt. Absent when the
+    /// request was rejected before connecting (an invalid pin, say) or the daemon predates it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub credential_boundary: Option<CredentialBoundary>,

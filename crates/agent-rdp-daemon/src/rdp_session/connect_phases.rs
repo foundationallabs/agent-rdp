@@ -80,6 +80,18 @@ impl PhaseStart {
 }
 
 impl ConnectTrace {
+    /// A trace with the given phases and boundary, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn recorded(
+        phases: Vec<ConnectPhase>,
+        credential_boundary: CredentialBoundary,
+    ) -> Self {
+        Self {
+            phases,
+            credential_boundary,
+        }
+    }
+
     pub fn into_parts(self) -> (Vec<ConnectPhase>, CredentialBoundary) {
         (self.phases, self.credential_boundary)
     }

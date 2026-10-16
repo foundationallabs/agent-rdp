@@ -29,6 +29,18 @@ fn connect_error_response(error: &RdpError, trace: ConnectTrace) -> Response {
     response
 }
 
+/// The response for a connect that succeeded, carrying its phases and where the credentials left.
+fn connected_response(host: String, width: u16, height: u16, trace: ConnectTrace) -> Response {
+    let (phases, credential_boundary) = trace.into_parts();
+    Response::success(ResponseData::Connected {
+        host,
+        width,
+        height,
+        phases: Some(phases),
+        credential_boundary: Some(credential_boundary),
+    })
+}
+
 /// Parse the request's server certificate pin, if it has one.
 fn parse_cert_pin(params: &ConnectRequest) -> Result<Option<CertPin>, Response> {
     params
@@ -235,14 +247,7 @@ pub async fn handle(
         }
     }
 
-    let (phases, credential_boundary) = trace.into_parts();
-    Response::success(ResponseData::Connected {
-        host,
-        width,
-        height,
-        phases: Some(phases),
-        credential_boundary: Some(credential_boundary),
-    })
+    connected_response(host, width, height, trace)
 }
 
 /// Handle a disconnect request.
@@ -289,9 +294,58 @@ pub async fn handle_disconnect(
 
 #[cfg(test)]
 mod tests {
-    use agent_rdp_protocol::AuthFailureReason;
+    use agent_rdp_protocol::{
+        AuthFailureReason, ConnectPhase, ConnectPhaseName, CredentialBoundary, PhaseOutcome,
+    };
 
     use super::*;
+
+    fn phase(phase: ConnectPhaseName, outcome: PhaseOutcome) -> ConnectPhase {
+        ConnectPhase {
+            phase,
+            started_at_ms: 1_760_000_000_000,
+            ms: 7,
+            outcome,
+            detail: None,
+        }
+    }
+
+    fn logon_trace(last: PhaseOutcome) -> (ConnectTrace, Vec<ConnectPhase>) {
+        let phases = vec![
+            phase(ConnectPhaseName::RdpConnect, PhaseOutcome::Ok),
+            phase(ConnectPhaseName::Logon, last),
+        ];
+        let trace = ConnectTrace::recorded(phases.clone(), CredentialBoundary::Logon);
+        (trace, phases)
+    }
+
+    #[test]
+    fn failed_connect_carries_its_phases_and_credential_boundary() {
+        let (trace, phases) = logon_trace(PhaseOutcome::Failed);
+        let response = connect_error_response(
+            &RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed),
+            trace,
+        );
+        let error = response.error.unwrap();
+        assert_eq!(error.phases, Some(phases));
+        assert_eq!(error.credential_boundary, Some(CredentialBoundary::Logon));
+    }
+
+    #[test]
+    fn successful_connect_carries_its_phases_and_credential_boundary() {
+        let (trace, phases) = logon_trace(PhaseOutcome::Ok);
+        let response = connected_response("10.0.0.5".to_string(), 1920, 1080, trace);
+        let Some(ResponseData::Connected {
+            phases: reported,
+            credential_boundary,
+            ..
+        }) = response.data
+        else {
+            panic!("expected connected data");
+        };
+        assert_eq!(reported, Some(phases));
+        assert_eq!(credential_boundary, Some(CredentialBoundary::Logon));
+    }
 
     #[test]
     fn refused_login_is_authentication_failed_with_reason() {

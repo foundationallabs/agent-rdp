@@ -156,3 +156,61 @@ test('a pin mismatch throws RdpError with certificate_mismatch and no reason', a
   assert.equal(error.code, 'certificate_mismatch');
   assert.equal(error.reason, undefined);
 });
+
+const PHASES = [
+  { phase: 'rdp_connect', started_at_ms: 1_760_000_000_000, ms: 12, outcome: 'ok' },
+  {
+    phase: 'logon',
+    started_at_ms: 1_760_000_000_012,
+    ms: 20_000,
+    outcome: 'timed_out',
+    detail: { error_code: 'authentication_failed', timeout_ms: 20_000 },
+  },
+];
+
+test('a failed connect throws RdpError with its phases and credential boundary', async () => {
+  const error = await connectError({
+    success: false,
+    error: {
+      code: 'authentication_failed',
+      message: 'unconfirmed',
+      reason: 'logon_unconfirmed',
+      phases: PHASES,
+      credential_boundary: 'logon',
+    },
+  });
+  assert.ok(error instanceof RdpError);
+  assert.deepEqual(error.phases, PHASES);
+  assert.equal(error.credentialBoundary, 'logon');
+});
+
+test('a failed connect from a daemon that predates the trace has neither field', async () => {
+  const error = await connectError({
+    success: false,
+    error: { code: 'connection_failed', message: 'refused' },
+  });
+  assert.equal(error.phases, undefined);
+  assert.equal(error.credentialBoundary, undefined);
+});
+
+test('a successful connect returns its phases and credential boundary', async () => {
+  const daemon = await startFakeDaemon({
+    success: true,
+    data: {
+      type: 'connected',
+      host: 'h',
+      width: 1,
+      height: 1,
+      phases: PHASES,
+      credential_boundary: 'rdp_connect',
+    },
+  });
+  try {
+    const rdp = new RdpSession({ session: daemon.session, timeout: 5000 });
+    const result = await rdp.connect({ host: 'h', username: 'u', password: 'p' });
+    assert.deepEqual(result.phases, PHASES);
+    assert.equal(result.credentialBoundary, 'rdp_connect');
+  } finally {
+    await daemon.close();
+  }
+});

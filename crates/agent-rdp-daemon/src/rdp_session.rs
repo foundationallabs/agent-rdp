@@ -106,8 +106,8 @@ fn tls_upgrade_error(error: std::io::Error) -> RdpError {
 
 /// How long `connect()` waits for the server to report the login result before it fails closed,
 /// counted from when the credentials left: NLA off, in the Client Info PDU; NLA on, from the start
-/// of CredSSP. The phases before it can take up to 45 s more, so a caller that wants the verdict
-/// passes a request timeout above the SDK's 30 s default.
+/// of CredSSP. The phases before it have their own limits ([`PHASE_TIMEOUTS`]) on top, so a caller
+/// that wants the verdict passes a request timeout above the SDK's 30 s default.
 const LOGON_OUTCOME_WINDOW: Duration = Duration::from_secs(20);
 
 /// How long an NLA-off `connect()` that answers a pre-logon notice waits for the login before it
@@ -191,8 +191,56 @@ async fn finalize_without_nla(
     }
 }
 
+/// `connect_finalize` for a server that selected NLA. CredSSP sends the credentials inside it, at
+/// a point it does not expose, so `rdp_connect` as a whole counts as past the boundary and a stall
+/// fails closed after `timing.logon_window`. Reading the server key comes first and sends nothing,
+/// so its failure does not.
+async fn finalize_with_nla(
+    upgraded: ironrdp_tokio::Upgraded,
+    connector: ClientConnector,
+    framed: &mut TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>,
+    server_cert: &[u8],
+    host: &str,
+    trace: &mut ConnectTrace,
+    timing: &ConnectTiming,
+) -> Result<ConnectionResult, RdpError> {
+    let server_public_key = RdpSession::extract_public_key(server_cert);
+    if server_public_key.is_ok() {
+        trace.credentials_leave_in(CredentialBoundary::RdpConnect);
+    }
+    let finalize = async {
+        let server_public_key = server_public_key?;
+
+        // Create network client for CredSSP
+        let mut network_client = NoopNetworkClient;
+
+        // Convert host to ServerName
+        let server_name: ServerName = host.to_string().into();
+
+        Ok(ironrdp_tokio::connect_finalize(
+            upgraded,
+            connector,
+            framed,
+            &mut network_client,
+            server_name,
+            server_public_key,
+            None, // No Kerberos
+        )
+        .await?)
+    };
+    let window = timing.logon_window;
+    let stalled = || logon_unconfirmed_after(window);
+    trace
+        .run_until(
+            ConnectPhaseName::RdpConnect,
+            Some((window, stalled)),
+            finalize,
+        )
+        .await
+}
+
 /// NLA off: steps the connection sequence through the Client Info PDU. Nothing before it carries
-/// the credentials, so a failure here is a connection failure the caller may retry.
+/// the password, so a failure here is a connection failure the caller may retry.
 async fn send_client_info(
     connector: &mut ClientConnector,
     framed: &mut TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>,
@@ -481,18 +529,17 @@ impl RdpSession {
         trace.detail().addresses = Some(addrs.iter().map(|a| a.ip().to_string()).collect());
 
         let mut tried = None;
-        let tcp_stream = trace
-            .run(
-                ConnectPhaseName::Tcp,
-                Some(timing.phases.tcp),
-                connect_phases::connect_tcp(&addrs, &mut tried),
-            )
+        let tcp = trace
+            .run(ConnectPhaseName::Tcp, Some(timing.phases.tcp), async {
+                let stream = connect_phases::connect_tcp(&addrs, &mut tried).await?;
+                let client_addr: SocketAddr = stream.local_addr()?;
+                Ok((stream, client_addr))
+            })
             .await;
         let detail = trace.detail();
         detail.address = tried.map(|addr| addr.ip().to_string());
         detail.port = Some(config.port);
-        let tcp_stream = tcp_stream?;
-        let client_addr: SocketAddr = tcp_stream.local_addr()?;
+        let (tcp_stream, client_addr) = tcp?;
         debug!("TCP connection established from {:?}", client_addr);
 
         // Create framed transport for initial connection
@@ -610,41 +657,16 @@ impl RdpSession {
                 finalize_without_nla(connector, &mut upgraded_framed, trace, &timing).await?;
             (result, Some(logon_start))
         } else {
-            // CredSSP sends the credentials inside connect_finalize, at a point it does not
-            // expose, so the whole phase counts as past the boundary and a stall fails closed.
-            // Reading the server key comes first and sends nothing, so its failure does not.
-            let server_public_key = Self::extract_public_key(&server_cert);
-            if server_public_key.is_ok() {
-                trace.credentials_leave_in(CredentialBoundary::RdpConnect);
-            }
-            let finalize = async {
-                let server_public_key = server_public_key?;
-
-                // Create network client for CredSSP
-                let mut network_client = NoopNetworkClient;
-
-                // Convert host to ServerName
-                let server_name: ServerName = config.host.clone().into();
-
-                Ok(ironrdp_tokio::connect_finalize(
-                    upgraded,
-                    connector,
-                    &mut upgraded_framed,
-                    &mut network_client,
-                    server_name,
-                    server_public_key,
-                    None, // No Kerberos
-                )
-                .await?)
-            };
-            let stalled = || logon_unconfirmed_after(logon_window);
-            let result = trace
-                .run_until(
-                    ConnectPhaseName::RdpConnect,
-                    Some((logon_window, stalled)),
-                    finalize,
-                )
-                .await?;
+            let result = finalize_with_nla(
+                upgraded,
+                connector,
+                &mut upgraded_framed,
+                &server_cert,
+                &config.host,
+                trace,
+                &timing,
+            )
+            .await?;
             (result, None)
         };
 
