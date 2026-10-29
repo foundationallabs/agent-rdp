@@ -42,6 +42,7 @@ import {
   OcrMatch,
   Request,
   Response,
+  ResponseData,
   RdpError,
 } from './types.js';
 
@@ -267,12 +268,14 @@ export class RdpSession {
     };
 
     const response = await this._send(request);
-    const data = response.data as { type: 'connected'; host: string; width: number; height: number };
+    const data = response.data as Extract<ResponseData, { type: 'connected' }>;
 
     return {
       host: data.host,
       width: data.width,
       height: data.height,
+      phases: data.phases,
+      credentialBoundary: data.credential_boundary,
     };
   }
 
@@ -412,6 +415,8 @@ export class RdpSession {
         response.error?.code ?? 'internal_error',
         response.error?.message ?? 'Unknown error',
         response.error?.reason,
+        response.error?.phases,
+        response.error?.credential_boundary,
       );
     }
 

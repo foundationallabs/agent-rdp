@@ -3,6 +3,7 @@
 use crate::automation::{
     AccessibilitySnapshot, AutomationStatus, ClickResult, ElementValue, RunResult, WindowInfo,
 };
+use crate::connect_trace::{ConnectPhase, CredentialBoundary};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ts_rs::TS;
@@ -53,6 +54,8 @@ impl Response {
                 code,
                 message: message.into(),
                 reason: None,
+                phases: None,
+                credential_boundary: None,
             }),
         }
     }
@@ -69,6 +72,8 @@ impl Response {
                 code: ErrorCode::AuthenticationFailed,
                 message: message.into(),
                 reason,
+                phases: None,
+                credential_boundary: None,
             }),
         }
     }
@@ -90,6 +95,14 @@ pub enum ResponseData {
         width: u16,
         /// Desktop height.
         height: u16,
+        /// The phases of the connect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        phases: Option<Vec<ConnectPhase>>,
+        /// Where the credentials left: `rdp_connect` with NLA on, `logon` with NLA off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        credential_boundary: Option<CredentialBoundary>,
     },
 
     /// Screenshot data.
@@ -267,6 +280,16 @@ pub struct ErrorInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub reason: Option<AuthFailureReason>,
+    /// For a failed connect: its phases, ending with the one that failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phases: Option<Vec<ConnectPhase>>,
+    /// For a failed connect: the first phase in which the credentials may have reached the
+    /// server, or `none` when the connect cannot have cost a login attempt. Absent when the
+    /// request was rejected before connecting (an invalid pin, say) or the daemon predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub credential_boundary: Option<CredentialBoundary>,
 }
 
 /// Why a login failed.
@@ -414,6 +437,8 @@ mod tests {
             host: "192.168.1.100".to_string(),
             width: 1920,
             height: 1080,
+            phases: None,
+            credential_boundary: None,
         });
 
         let json = serde_json::to_string(&resp).unwrap();
