@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+
+### Features
+
+* `connect` gains the opt-in `acknowledge_logon_notice` (CLI `--acknowledge-logon-notice`, SDK `acknowledgeLogonNotice`). When the server skips NLA and Windows has not confirmed the logon 5 s after the connection came up, agent-rdp presses Enter once, which dismisses a Windows pre-logon notice (the "legal notice" policy) through its default OK button, then keeps waiting until the usual 20 s deadline. Without it, such a notice holds the logon until `connect` fails as `logon_unconfirmed`. Only one press, because a second Enter on a sign-in screen could submit an empty password. The press is blind: on a host that discards the sent password and shows its sign-in prompt (the "Always prompt for password" policy), that one Enter submits an empty password, which can count as a failed logon. Off by default; with it off, `connect` behaves exactly as in 0.8.0.
+
 ## 0.8.0 (2026-10-09)
 
 

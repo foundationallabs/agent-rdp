@@ -204,10 +204,21 @@ pub async fn await_logon_report(
     mut report_rx: oneshot::Receiver<LogonReport>,
     window: Duration,
 ) -> Option<LogonReport> {
-    match tokio::time::timeout(window, &mut report_rx).await {
-        Ok(received) => Some(received.unwrap_or(LogonReport::SessionEnded)),
-        Err(_) => settle_after_deadline(&mut report_rx),
+    let deadline = tokio::time::Instant::now() + window;
+    match logon_report_by(&mut report_rx, deadline).await {
+        Some(report) => Some(report),
+        None => settle_after_deadline(&mut report_rx),
     }
+}
+
+/// Wait until `at` for the frame processor's report, still accepting it afterwards. `None` means
+/// none has come yet.
+pub async fn logon_report_by(
+    report_rx: &mut oneshot::Receiver<LogonReport>,
+    at: tokio::time::Instant,
+) -> Option<LogonReport> {
+    let received = tokio::time::timeout_at(at, report_rx).await.ok()?;
+    Some(received.unwrap_or(LogonReport::SessionEnded))
 }
 
 /// Close first so a report racing the deadline is either received here or refused. A refused

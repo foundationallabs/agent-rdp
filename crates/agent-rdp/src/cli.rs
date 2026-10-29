@@ -117,6 +117,10 @@ pub struct ConnectArgs {
     #[arg(long)]
     pub no_nla: bool,
 
+    /// When the server skips NLA (as with --no-nla): press Enter once if the login is still unconfirmed 5 s after connecting, to dismiss a Windows pre-logon notice (legal notice)
+    #[arg(long)]
+    pub acknowledge_logon_notice: bool,
+
     /// Require this server key: sha256/<base64> of the certificate's DER SubjectPublicKeyInfo
     #[arg(long, value_name = "PIN")]
     pub server_cert_pin: Option<String>,
