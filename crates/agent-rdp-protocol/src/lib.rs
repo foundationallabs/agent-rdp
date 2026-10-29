@@ -4,10 +4,12 @@
 //! communication between the CLI and the daemon over IPC.
 
 mod automation;
+mod connect_trace;
 mod request;
 mod response;
 
 pub use automation::*;
+pub use connect_trace::*;
 pub use request::*;
 pub use response::*;
 
