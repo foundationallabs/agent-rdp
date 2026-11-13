@@ -3,38 +3,20 @@
  */
 
 import * as net from 'node:net';
-import * as crypto from 'node:crypto';
 import { Request, Response, RdpError } from './types.js';
+import { getSocketPath, type PathOptions } from './paths.js';
+
+// Path helpers live in paths.ts; re-exported so existing `./client.js` imports keep working.
+export {
+  getSessionDir,
+  getSocketPath,
+  getPidPath,
+  getStateDir,
+  readDaemonPid,
+  validateSessionName,
+} from './paths.js';
 
 const DEFAULT_TIMEOUT = 30000;
-
-/**
- * Get the socket path for a session.
- * On Windows, returns a TCP port number instead.
- */
-export function getSocketPath(session: string): string | number {
-  if (process.platform === 'win32') {
-    // Windows: use TCP port derived from session name hash
-    const hash = crypto.createHash('sha256').update(session).digest();
-    const port = 49152 + (hash.readUInt16LE(0) % 16383); // Range: 49152-65535
-    return port;
-  } else {
-    // Unix: use socket file
-    return `/tmp/agent-rdp/${session}/socket`;
-  }
-}
-
-/**
- * Get the temp directory for a session.
- */
-export function getSessionDir(session: string): string {
-  if (process.platform === 'win32') {
-    const temp = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
-    return `${temp}\\agent-rdp\\${session}`;
-  } else {
-    return `/tmp/agent-rdp/${session}`;
-  }
-}
 
 /**
  * IPC client for communicating with the daemon.
@@ -45,13 +27,20 @@ export class IpcClient {
   private pendingResolve: ((response: Response) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
 
-  constructor(private session: string) {}
+  /**
+   * @param session Session name.
+   * @param opts Path options; `stateDir` must match the daemon's state directory.
+   */
+  constructor(
+    private session: string,
+    private opts: PathOptions = {},
+  ) {}
 
   /**
    * Connect to the daemon socket.
    */
   async connect(): Promise<void> {
-    const socketPath = getSocketPath(this.session);
+    const socketPath = getSocketPath(this.session, this.opts);
 
     return new Promise((resolve, reject) => {
       const socket =

@@ -103,6 +103,14 @@ pub enum ResponseData {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         credential_boundary: Option<CredentialBoundary>,
+        /// Token the stream URL requires (`?token=`); present when a stream server is running after this connect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        stream_token: Option<String>,
+        /// Port the stream server actually listens on; present with `stream_token`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        stream_port: Option<u16>,
     },
 
     /// Screenshot data.
@@ -439,6 +447,8 @@ mod tests {
             height: 1080,
             phases: None,
             credential_boundary: None,
+            stream_token: None,
+            stream_port: None,
         });
 
         let json = serde_json::to_string(&resp).unwrap();

@@ -29,8 +29,47 @@ fn connect_error_response(error: &RdpError, trace: ConnectTrace) -> Response {
     response
 }
 
+/// Where the stream server of a connected session listens, and the token it requires.
+struct StreamInfo {
+    port: u16,
+    token: String,
+}
+
+/// Stop the session's stream server, if one is running, and forget its clipboard channel.
+///
+/// Every stop goes through here (connect, restart and disconnect) so the server, its clients and
+/// the clipboard receiver never get out of step.
+async fn stop_stream(ws_handle: &SharedWsHandle, clipboard_changed_rx: &ClipboardChangedRx) {
+    let running = ws_handle.lock().await.take();
+    if let Some(handle) = running {
+        info!("Stopping the WebSocket streaming server");
+        handle.shutdown().await;
+    }
+    *clipboard_changed_rx.lock().await = None;
+}
+
+/// Start a stream server for the session and store it in the slot.
+///
+/// `handle` stops any running stream before connecting (via [`stop_stream`]), so every connect
+/// gets a new token and the previous server's clients are dropped; the slot is empty here.
+async fn start_stream(
+    ws_handle: &SharedWsHandle,
+    rdp_session: &Arc<Mutex<Option<RdpSession>>>,
+    config: WsServerConfig,
+) -> anyhow::Result<()> {
+    let handle = WsServer::new(config).start(Arc::clone(rdp_session)).await?;
+    *ws_handle.lock().await = Some(handle);
+    Ok(())
+}
+
 /// The response for a connect that succeeded, carrying its phases and where the credentials left.
-fn connected_response(host: String, width: u16, height: u16, trace: ConnectTrace) -> Response {
+fn connected_response(
+    host: String,
+    width: u16,
+    height: u16,
+    trace: ConnectTrace,
+    stream: Option<StreamInfo>,
+) -> Response {
     let (phases, credential_boundary) = trace.into_parts();
     Response::success(ResponseData::Connected {
         host,
@@ -38,6 +77,8 @@ fn connected_response(host: String, width: u16, height: u16, trace: ConnectTrace
         height,
         phases: Some(phases),
         credential_boundary: Some(credential_boundary),
+        stream_token: stream.as_ref().map(|s| s.token.clone()),
+        stream_port: stream.map(|s| s.port),
     })
 }
 
@@ -100,6 +141,10 @@ pub async fn handle(
         Err(response) => return response,
     };
 
+    // Stop any running stream first: its token and viewers belong to the previous connection,
+    // so they must never see frames from the new target (streaming or not).
+    stop_stream(ws_handle, clipboard_changed_rx).await;
+
     // Auto-disconnect if already connected (handles stale/dropped connections)
     {
         let mut session = rdp_session.lock().await;
@@ -116,7 +161,7 @@ pub async fn handle(
     {
         let mut auto_state = automation_state.lock().await;
         if auto_state.enabled {
-            let session_dir = crate::get_session_dir("");
+            let session_dir = crate::get_base_dir();
             let bootstrap = AutomationBootstrap::new(session_dir);
             let _ = bootstrap.cleanup(&mut auto_state).await;
         }
@@ -127,7 +172,7 @@ pub async fn handle(
     // otherwise Windows will get "invalid address" errors trying to access it
     let mut drives = params.drives.clone();
     if enable_automation {
-        let session_dir = crate::get_session_dir("");
+        let session_dir = crate::get_base_dir();
         let bootstrap = AutomationBootstrap::new(session_dir);
 
         // Initialize automation directory structure first
@@ -183,39 +228,32 @@ pub async fn handle(
 
     info!("Connected to {} ({}x{})", host, width, height);
 
-    // Start WebSocket streaming server if requested
+    // Start a fresh WebSocket streaming server if requested (new token, old clients dropped)
     if stream_port > 0 {
-        let mut ws = ws_handle.lock().await;
-        if ws.is_none() {
-            let fps = get_stream_fps(stream_fps);
-            let config = WsServerConfig {
-                port: stream_port,
-                fps,
-                jpeg_quality: stream_quality,
-                serve_viewer,
-            };
-            let ws_server = WsServer::new(config);
-            match ws_server.start(Arc::clone(rdp_session)).await {
-                Ok(handle) => {
-                    info!("WebSocket streaming enabled on port {} at {} fps", stream_port, fps);
-                    stream_fps_tx.send_replace(fps);
-                    *ws = Some(handle);
+        let fps = get_stream_fps(stream_fps);
+        let config = WsServerConfig {
+            port: stream_port,
+            fps,
+            jpeg_quality: stream_quality,
+            serve_viewer,
+        };
+        match start_stream(ws_handle, rdp_session, config).await {
+            Ok(()) => {
+                info!("WebSocket streaming enabled on port {} at {} fps", stream_port, fps);
+                stream_fps_tx.send_replace(fps);
 
-                    // Set up clipboard change notification channel
-                    let session = rdp_session.lock().await;
-                    if let Some(ref rdp) = *session {
-                        let (changed_tx, changed_rx) = tokio::sync::mpsc::unbounded_channel();
-                        rdp.set_clipboard_changed_notify(changed_tx);
-                        *clipboard_changed_rx.lock().await = Some(changed_rx);
-                        info!("Clipboard WebSocket integration enabled");
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to start WebSocket server: {}", e);
+                // Set up clipboard change notification channel
+                let session = rdp_session.lock().await;
+                if let Some(ref rdp) = *session {
+                    let (changed_tx, changed_rx) = tokio::sync::mpsc::unbounded_channel();
+                    rdp.set_clipboard_changed_notify(changed_tx);
+                    *clipboard_changed_rx.lock().await = Some(changed_rx);
+                    info!("Clipboard WebSocket integration enabled");
                 }
             }
-        } else {
-            info!("WebSocket server already running");
+            Err(e) => {
+                warn!("Failed to start WebSocket server: {}", e);
+            }
         }
     }
 
@@ -223,7 +261,7 @@ pub async fn handle(
     if enable_automation {
         info!("Bootstrapping Windows UI Automation...");
 
-        let session_dir = crate::get_session_dir("");
+        let session_dir = crate::get_base_dir();
         let bootstrap = AutomationBootstrap::new(session_dir);
 
         // Launch the agent via Win+R
@@ -247,7 +285,16 @@ pub async fn handle(
         }
     }
 
-    connected_response(host, width, height, trace)
+    let stream = ws_handle
+        .lock()
+        .await
+        .as_ref()
+        .map(|handle| StreamInfo {
+            port: handle.local_addr().port(),
+            token: handle.token().as_str().to_string(),
+        });
+
+    connected_response(host, width, height, trace, stream)
 }
 
 /// Handle a disconnect request.
@@ -255,21 +302,15 @@ pub async fn handle_disconnect(
     rdp_session: &Arc<Mutex<Option<RdpSession>>>,
     automation_state: &SharedAutomationState,
     ws_handle: &SharedWsHandle,
+    clipboard_changed_rx: &ClipboardChangedRx,
 ) -> Response {
-    // Stop WebSocket server if running
-    {
-        let mut ws = ws_handle.lock().await;
-        if ws.is_some() {
-            info!("Stopping WebSocket streaming server");
-            *ws = None; // Drop the handle to stop the server
-        }
-    }
+    stop_stream(ws_handle, clipboard_changed_rx).await;
 
     // Clean up automation state
     {
         let mut auto_state = automation_state.lock().await;
         if auto_state.enabled {
-            let session_dir = crate::get_session_dir("");
+            let session_dir = crate::get_base_dir();
             let bootstrap = AutomationBootstrap::new(session_dir);
             if let Err(e) = bootstrap.cleanup(&mut auto_state).await {
                 warn!("Error cleaning up automation: {}", e);
@@ -334,10 +375,12 @@ mod tests {
     #[test]
     fn successful_connect_carries_its_phases_and_credential_boundary() {
         let (trace, phases) = logon_trace(PhaseOutcome::Ok);
-        let response = connected_response("10.0.0.5".to_string(), 1920, 1080, trace);
+        let response = connected_response("10.0.0.5".to_string(), 1920, 1080, trace, Some(StreamInfo { port: 9001, token: "tok".to_string() }));
         let Some(ResponseData::Connected {
             phases: reported,
             credential_boundary,
+            stream_token,
+            stream_port,
             ..
         }) = response.data
         else {
@@ -345,6 +388,8 @@ mod tests {
         };
         assert_eq!(reported, Some(phases));
         assert_eq!(credential_boundary, Some(CredentialBoundary::Logon));
+        assert_eq!(stream_token.as_deref(), Some("tok"));
+        assert_eq!(stream_port, Some(9001));
     }
 
     #[test]
@@ -462,5 +507,65 @@ mod tests {
     fn rdp_config_alternate_shell_none_when_unset() {
         let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None, None);
         assert_eq!(config.alternate_shell, None);
+    }
+
+    fn test_stream_config() -> WsServerConfig {
+        WsServerConfig {
+            port: 0,
+            fps: 10,
+            jpeg_quality: 50,
+            serve_viewer: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn each_stream_start_gets_a_new_token_and_drops_old_clients() {
+        let session = Arc::new(Mutex::new(None));
+        let ws: SharedWsHandle = Arc::new(Mutex::new(None));
+        let rx: ClipboardChangedRx = Arc::new(Mutex::new(None));
+        start_stream(&ws, &session, test_stream_config()).await.unwrap();
+        let (port, token) = {
+            let guard = ws.lock().await;
+            let first = guard.as_ref().unwrap();
+            (first.local_addr().port(), first.token().as_str().to_string())
+        };
+        let url = format!("ws://127.0.0.1:{port}/?token={token}");
+        let (mut client, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        stop_stream(&ws, &rx).await;
+        start_stream(&ws, &session, test_stream_config()).await.unwrap();
+        assert_ne!(ws.lock().await.as_ref().unwrap().token().as_str(), token);
+
+        use futures_util::StreamExt;
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(Ok(msg)) = client.next().await {
+                if msg.is_close() {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "first client should be closed");
+    }
+
+    #[tokio::test]
+    async fn stop_stream_empties_the_slot_clears_the_receiver_and_frees_the_port() {
+        let session = Arc::new(Mutex::new(None));
+        let ws: SharedWsHandle = Arc::new(Mutex::new(None));
+        let rx: ClipboardChangedRx = Arc::new(Mutex::new(None));
+        start_stream(&ws, &session, test_stream_config()).await.unwrap();
+        // A connect installs the clipboard receiver after the stream starts
+        let (_tx, changed_rx) = tokio::sync::mpsc::unbounded_channel();
+        *rx.lock().await = Some(changed_rx);
+        let port = ws.lock().await.as_ref().unwrap().local_addr().port();
+
+        stop_stream(&ws, &rx).await;
+
+        assert!(ws.lock().await.is_none());
+        assert!(rx.lock().await.is_none());
+        let refused = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err();
+        assert!(refused, "old port should refuse connections");
+        // Stopping again is a no-op
+        stop_stream(&ws, &rx).await;
     }
 }

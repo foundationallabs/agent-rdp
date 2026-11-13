@@ -274,19 +274,21 @@ agent-rdp disconnect
 Open the web-based viewer to see the remote desktop in your browser:
 
 ```bash
-# Open viewer (connects to default streaming port 9224)
-agent-rdp view
+# Open viewer (default streaming port 9224; the token comes from `connect`)
+agent-rdp view --token <token>
 
 # Specify a different port
-agent-rdp view --port 9224
+agent-rdp view --port 9224 --token <token>
 ```
 
 The viewer requires WebSocket streaming to be enabled. Start a session with streaming:
 
 ```bash
 agent-rdp --stream-port 9224 connect --host 192.168.1.100 -u Admin -p secret
-agent-rdp view
+agent-rdp view --token <token printed by connect>
 ```
+
+The stream requires the token printed by `connect` (`Stream: ws://127.0.0.1:9224/?token=...`, or `stream_token` in `--json` output).
 
 ## JSON Output
 
@@ -332,6 +334,15 @@ agent-rdp --json screenshot --base64
 | `AGENT_RDP_ALTERNATE_SHELL` | Alternate shell to start instead of the desktop |
 | `AGENT_RDP_SESSION` | Session name (default: "default") |
 | `AGENT_RDP_STREAM_PORT` | WebSocket streaming port (0 = disabled) |
+| `AGENT_RDP_STATE_DIR` | Base directory for session state (absolute path; default `/tmp/agent-rdp`) |
+| `AGENT_RDP_STREAM_TOKEN` | Stream token for `agent-rdp view` (same as `--token`; the token comes from `connect`) |
+| `AGENT_RDP_BINARY` | Node.js SDK only: absolute path of the `agent-rdp` binary to spawn instead of the platform package's; an error if it does not exist |
+
+### State directory permissions
+
+On Unix the CLI and the Node.js SDK refuse to use a session whose state directories another user could control: the state directory must be a real directory owned by you or root (and sticky if others can write to it), and the session directory a real directory owned by you with no group or other permissions. The check runs before a running daemon's pid file or socket is trusted and again after a new daemon starts, so the connect request (which carries the RDP password) is never sent to a daemon in such a directory. The SDK exposes it as `verifySessionDirs(session, { stateDir })`.
+
+This does not cover other processes running as your own user, nor a state directory whose parent directories are controlled by another user: choose a state directory under a directory you or root own.
 
 ## Node.js API
 
@@ -426,8 +437,10 @@ const rdp = new RdpSession({
 await rdp.connect({...});
 
 // Connect your WebSocket client to receive JPEG frames
-const streamUrl = rdp.getStreamUrl(); // "ws://127.0.0.1:9224"
+const streamUrl = rdp.getStreamUrl(); // "ws://127.0.0.1:9224/?token=..." (null until connected)
 ```
+
+The stream requires the `?token=` query parameter and answers `401` without it. The token is new on every connect and comes from the connect response (`stream_token`), the SDK's `getStreamUrl()`, or the CLI's connect output. It protects against other users on the machine and against web pages (DNS rebinding); it does not protect against other processes running as the same user, which can read the token like any client.
 
 For the complete WebSocket protocol specification (message types, clipboard flow, input handling), see [WEBSOCKET.md](https://github.com/foundationallabs/agent-rdp/blob/main/docs/WEBSOCKET.md).
 

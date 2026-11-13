@@ -19,19 +19,28 @@ Start a session with the `--stream-port` flag:
 agent-rdp --stream-port 9224 connect --host 192.168.1.100 -u Admin -p secret
 ```
 
+### Authentication
+
+Every HTTP and WebSocket request to the stream port must carry the stream token as the `token` query parameter (`/?token=<token>`); otherwise the server answers `401 Unauthorized`. Every `connect` stops any running stream server and drops its clients; a `connect` that asks for streaming then starts a new one with a new random token. Get it from:
+
+- the connect response (`stream_token` and `stream_port` in `--json` output; the `Stream:` line of the human output),
+- the SDK: `rdp.getStreamUrl()` returns the full URL including the token.
+
+The token protects against other users on the machine and against web pages that try to reach the port (for example DNS rebinding). It does not protect against other processes running as the same user, which can obtain the token the same way you do.
+
 ### Accessing the Viewer
 
 The daemon serves both the WebSocket API and an embedded HTML viewer on the same port:
 
-- **HTML Viewer**: `http://127.0.0.1:{port}` (e.g., `http://127.0.0.1:9224`)
-- **WebSocket API**: `ws://127.0.0.1:{port}` (e.g., `ws://127.0.0.1:9224`)
+- **HTML Viewer**: `http://127.0.0.1:{port}/?token={token}` (e.g., `http://127.0.0.1:9224/?token=...`)
+- **WebSocket API**: `ws://127.0.0.1:{port}/?token={token}` (e.g., `ws://127.0.0.1:9224/?token=...`)
 
 The port automatically detects whether an incoming request is a WebSocket upgrade or regular HTTP and responds appropriately.
 
 You can also use the CLI to open the viewer in your browser:
 
 ```bash
-agent-rdp view --port 9224
+agent-rdp view --port 9224 --token <token>
 ```
 
 ## Message Types
@@ -296,16 +305,16 @@ The daemon serves an embedded HTML viewer that demonstrates a complete implement
 agent-rdp --stream-port 9224 connect --host 192.168.1.100 -u Admin -p secret
 
 # Open viewer (method 1: CLI command)
-agent-rdp view --port 9224
+agent-rdp view --port 9224 --token <token>
 
 # Open viewer (method 2: direct browser access)
-# Navigate to http://127.0.0.1:9224 in your browser
+# Navigate to http://127.0.0.1:9224/?token=<token> in your browser
 ```
 
 ### Programmatic Access
 
 ```javascript
-const ws = new WebSocket('ws://127.0.0.1:9224');
+const ws = new WebSocket('ws://127.0.0.1:9224/?token=' + token);
 
 ws.onmessage = async (event) => {
   const msg = JSON.parse(event.data);

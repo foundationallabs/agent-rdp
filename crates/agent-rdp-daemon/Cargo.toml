@@ -59,6 +59,12 @@ uuid = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 
+# Stream authentication
+httparse = { workspace = true }
+form_urlencoded = { workspace = true }
+subtle = { workspace = true }
+getrandom = { workspace = true }
+
 # OCR
 ocrs = { workspace = true }
 rten = { workspace = true }

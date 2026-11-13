@@ -9,14 +9,24 @@ import * as net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { RdpError, RdpSession } from '../dist/index.js';
 import { getSessionDir, getSocketPath } from '../dist/client.js';
+import { cleanup, makeStateDir } from './helpers.mjs';
+
+// Use a private state directory: clients refuse a shared /tmp/agent-rdp that is world-writable
+// without the sticky bit, and a test run should not depend on what is already there.
+const STATE_DIR = makeStateDir('rdp-pay-');
+process.env.AGENT_RDP_STATE_DIR = STATE_DIR;
+process.on('exit', () => cleanup(STATE_DIR));
 
 const CONNECTED = { success: true, data: { type: 'connected', host: 'h', width: 1, height: 1 } };
 
-/** Start a fake daemon for a fresh session; resolves with the session name and received requests. */
+/**
+ * Start a fake daemon for a fresh session; resolves with the session name and received requests.
+ * `response` may be a function returning the response, to vary it per request.
+ */
 async function startFakeDaemon(response = CONNECTED) {
   const session = `sdk-test-${randomUUID().slice(0, 8)}`;
   const dir = getSessionDir(session);
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); // clients refuse looser session dirs
   // DaemonManager.isRunning() only checks that the pid in this file is alive.
   fs.writeFileSync(`${dir}/pid`, String(process.pid));
 
@@ -32,7 +42,8 @@ async function startFakeDaemon(response = CONNECTED) {
         const line = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 1);
         requests.push(JSON.parse(line));
-        socket.write(JSON.stringify(response) + '\n');
+        const reply = typeof response === 'function' ? response() : response;
+        socket.write(JSON.stringify(reply) + '\n');
       }
     });
   });
@@ -210,6 +221,93 @@ test('a successful connect returns its phases and credential boundary', async ()
     const result = await rdp.connect({ host: 'h', username: 'u', password: 'p' });
     assert.deepEqual(result.phases, PHASES);
     assert.equal(result.credentialBoundary, 'rdp_connect');
+  } finally {
+    await daemon.close();
+  }
+});
+
+function connectedWithToken(token, port = 9333) {
+  return { success: true, data: { ...CONNECTED.data, stream_token: token, stream_port: port } };
+}
+
+test('getStreamUrl carries the stream token, refreshes on reconnect and clears on disconnect', async () => {
+  const tokens = ['abc', 'a b/c'];
+  let connects = 0;
+  const daemon = await startFakeDaemon(() => {
+    // The disconnect request also gets a reply; only connect responses carry a token
+    const last = daemon.requests[daemon.requests.length - 1];
+    return last.type === 'connect' ? connectedWithToken(tokens[connects++]) : { success: true, data: { type: 'ok' } };
+  });
+  try {
+    const rdp = new RdpSession({ session: daemon.session, timeout: 5000, streamPort: 9333 });
+    assert.equal(rdp.getStreamUrl(), null);
+
+    await rdp.connect({ host: 'h', username: 'u', password: 'p' });
+    assert.equal(rdp.getStreamUrl(), 'ws://127.0.0.1:9333/?token=abc');
+
+    await rdp.connect({ host: 'h', username: 'u', password: 'p' });
+    assert.equal(rdp.getStreamUrl(), `ws://127.0.0.1:9333/?token=${encodeURIComponent('a b/c')}`);
+
+    await rdp.disconnect();
+    assert.equal(rdp.getStreamUrl(), null);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test('getStreamUrl uses the port the daemon reported, not the requested one', async () => {
+  const daemon = await startFakeDaemon(connectedWithToken('abc', 9001));
+  try {
+    const rdp = new RdpSession({ session: daemon.session, timeout: 5000, streamPort: 9002 });
+    const result = await rdp.connect({ host: 'h', username: 'u', password: 'p' });
+    assert.equal(rdp.getStreamUrl(), 'ws://127.0.0.1:9001/?token=abc');
+    assert.equal(result.streamUrl, 'ws://127.0.0.1:9001/?token=abc');
+  } finally {
+    await daemon.close();
+  }
+});
+
+test('a failing connect after a successful one clears the stream URL', async () => {
+  let fail = false;
+  const daemon = await startFakeDaemon(() =>
+    fail ? { success: false, error: { code: 'connection_failed', message: 'no' } } : connectedWithToken('abc'),
+  );
+  try {
+    const rdp = new RdpSession({ session: daemon.session, timeout: 5000, streamPort: 9333 });
+    await rdp.connect({ host: 'h', username: 'u', password: 'p' });
+    assert.notEqual(rdp.getStreamUrl(), null);
+    fail = true;
+    await assert.rejects(rdp.connect({ host: 'h', username: 'u', password: 'p' }), RdpError);
+    assert.equal(rdp.getStreamUrl(), null);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test('a daemon that reports no stream leaves streamUrl null and connect still succeeds', async () => {
+  const daemon = await startFakeDaemon(CONNECTED);
+  try {
+    const rdp = new RdpSession({ session: daemon.session, timeout: 5000, streamPort: 9333 });
+    const result = await rdp.connect({ host: 'h', username: 'u', password: 'p' });
+    assert.equal(result.streamUrl, null);
+    assert.equal(rdp.getStreamUrl(), null);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test('a re-created IPC client keeps the stream URL when no new daemon was spawned', async () => {
+  const daemon = await startFakeDaemon(() => connectedWithToken('abc'));
+  try {
+    const rdp = new RdpSession({ session: daemon.session, timeout: 5000, streamPort: 9333 });
+    await rdp.connect({ host: 'h', username: 'u', password: 'p' });
+    const url = rdp.getStreamUrl();
+    assert.notEqual(url, null);
+
+    // close() drops the IPC client only; the next call reconnects to the same live daemon
+    await rdp.close();
+    await rdp.getInfo();
+    assert.equal(rdp.getStreamUrl(), url);
   } finally {
     await daemon.close();
   }

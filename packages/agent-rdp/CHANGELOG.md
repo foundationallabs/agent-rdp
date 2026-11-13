@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.10.0
+
+### Features
+
+* `AGENT_RDP_STATE_DIR` (SDK: `stateDir` option) sets the base directory for session state (absolute path; default `/tmp/agent-rdp`). The SDK exports `getStateDir`, `getSessionDir`, `getSocketPath`, `getPidPath`, `readDaemonPid`, `validateSessionName` and `verifySessionDirs`.
+* `AGENT_RDP_BINARY` makes the SDK spawn the given `agent-rdp` binary (absolute path) instead of the platform package's.
+* `connect` returns `stream_token` and `stream_port` when the stream server runs; `getStreamUrl()` builds `ws://127.0.0.1:<port>/?token=...` from them and returns `null` until `connect()` has returned one (also cleared by `disconnect()` and a daemon restart). `ConnectResult.streamUrl` is `null` when the daemon did not start the stream: port in use, or a pre-0.10 daemon still running for this session.
+
+### Behavior Changes
+
+* The stream port answers `401` unless the request carries the stream token as `?token=`. The token changes whenever the stream server starts. `agent-rdp view` gains `--token`.
+* Session names must match `[A-Za-z0-9._-]+` and not be `.` or `..`.
+* On Unix the state and session directories are created `0700` (an existing directory owned by another user, or a symlink, is refused) and the socket and pid file `0600`. A socket path over 103 bytes is rejected.
+* The CLI and the SDK refuse to use a session directory not owned by the current user or writable by others, and a state directory not owned by the current user or root (or writable by others without the sticky bit), before trusting a running daemon and before connecting to a new one. This does not protect against other processes running as the same user, nor against a state directory whose parent directories are controlled by another user: choose a state directory under a directory you or root own.
+* Disconnecting stops the stream server and closes its clients. Every `connect` stops a running stream server and drops its clients; a streaming `connect` starts a new one with a new token.
+
+### Upgrading
+
+* Stop daemons started by an earlier version before using 0.10 (`agent-rdp --session <name> session close`, or kill the pid): an old daemon serves the stream without a token.
+* Session names are now restricted to `[A-Za-z0-9._-]`. Stop daemons with other names by pid.
+* Earlier versions created the state and session directories with the process umask, so on systems with umask `002` (common on desktop Linux) `/tmp/agent-rdp` and its session directories are group-writable, and 0.10 refuses them as unsafe. After stopping the old daemons, remove `/tmp/agent-rdp` (or your `AGENT_RDP_STATE_DIR`); 0.10 recreates it `0700`.
+
 ## 0.9.0 (2026-10-29)
 
 

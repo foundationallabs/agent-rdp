@@ -4,12 +4,40 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use agent_rdp_daemon::{cleanup_session, get_pid_path, get_session_dir, get_socket_path};
+use agent_rdp_daemon::{
+    cleanup_session, get_pid_path, get_session_dir, get_socket_path, verify_base_dir,
+    verify_session_dirs, PathsError,
+};
 use agent_rdp_protocol::Request;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::ipc_client::IpcClient;
+
+/// Why no daemon can be used for a session right now.
+#[derive(Debug)]
+enum DaemonUnavailable {
+    /// The state directory is unsafe, so nothing in it is trusted.
+    UnsafeDir(PathsError),
+    /// No live daemon exists.
+    NotRunning,
+}
+
+impl DaemonUnavailable {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::UnsafeDir(_) => "invalid_request",
+            Self::NotRunning => "daemon_not_running",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::UnsafeDir(e) => e.to_string(),
+            Self::NotRunning => "No daemon running for this session".to_string(),
+        }
+    }
+}
 
 /// Session manager handles daemon lifecycle.
 pub struct SessionManager {
@@ -38,8 +66,59 @@ impl SessionManager {
         get_pid_path(&self.session)
     }
 
+    /// Refuse to trust the session's state directories if another user controls them.
+    ///
+    /// Nothing existing yet is fine (a daemon will create the directories); anything that
+    /// exists must pass [`verify_session_dirs`]. With no session directory, an existing base
+    /// directory must still pass [`verify_base_dir`], because a daemon would refuse it and
+    /// the user would only see a startup timeout.
+    fn verify_dirs(&self) -> Result<(), PathsError> {
+        let missing = |path: PathBuf| {
+            matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        };
+        if !missing(self.session_dir()) {
+            verify_session_dirs(&self.session)
+        } else if !missing(agent_rdp_daemon::get_base_dir()) {
+            verify_base_dir()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Verify the state directories once, then check that a daemon is running.
+    fn check_running(&self) -> Result<(), DaemonUnavailable> {
+        self.verify_dirs().map_err(DaemonUnavailable::UnsafeDir)?;
+        if self.process_alive() {
+            Ok(())
+        } else {
+            Err(DaemonUnavailable::NotRunning)
+        }
+    }
+
+    /// Command pre-check: `true` when a daemon is running; otherwise prints the reason
+    /// (`invalid_request` for an unsafe state directory, else `daemon_not_running`) and
+    /// returns `false`, and the caller should exit with a failure status.
+    pub fn require_running_daemon(&self, output: &crate::output::Output) -> bool {
+        match self.check_running() {
+            Ok(()) => true,
+            Err(reason) => {
+                output.print_error(reason.code(), &reason.message());
+                false
+            }
+        }
+    }
+
     /// Check if the daemon is running.
+    ///
+    /// A state directory that fails verification is reported as not running and left untouched;
+    /// `require_running_daemon` and `ensure_daemon` report why.
     pub fn is_daemon_alive(&self) -> bool {
+        self.check_running().is_ok()
+    }
+
+    /// Check the pid file and process, trusting the state directories (callers verified them).
+    /// Removes a stale session directory.
+    fn process_alive(&self) -> bool {
         let pid_path = self.pid_path();
 
         if !pid_path.exists() {
@@ -102,8 +181,11 @@ impl SessionManager {
 
     /// Ensure the daemon is running, starting it if necessary.
     pub async fn ensure_daemon(&self) -> anyhow::Result<IpcClient> {
+        // Never trust a pid file or socket in a directory another user controls
+        self.verify_dirs()?;
+
         // Check if already running
-        if self.is_daemon_alive() {
+        if self.process_alive() {
             debug!("Daemon already running, connecting...");
             match self.connect_to_daemon().await {
                 Ok(client) => {
@@ -213,6 +295,8 @@ impl SessionManager {
             let should_try = true;
 
             if should_try {
+                // The daemon created these just now; make sure no one else swapped them in
+                self.verify_dirs()?;
                 match IpcClient::connect(&socket_path).await {
                     Ok(client) => {
                         debug!("Connected to daemon");
@@ -257,5 +341,49 @@ impl SessionManager {
         }
 
         sessions
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A private temp state dir that is removed on drop, even when an assert fails.
+    struct TempStateDir(PathBuf);
+
+    impl TempStateDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("rdp-sm-{}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            std::env::set_var(agent_rdp_daemon::STATE_DIR_ENV, &path);
+            Self(path)
+        }
+
+        fn chmod(&self, mode: u32) {
+            std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    }
+
+    impl Drop for TempStateDir {
+        fn drop(&mut self) {
+            std::env::remove_var(agent_rdp_daemon::STATE_DIR_ENV);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn unsafe_state_dir_is_invalid_request_and_a_clean_one_is_daemon_not_running() {
+        let base = TempStateDir::new();
+        let manager = SessionManager::new("nope".to_string());
+
+        base.chmod(0o775);
+        let reason = manager.check_running().unwrap_err();
+        assert_eq!(reason.code(), "invalid_request");
+        assert!(reason.message().contains("sticky"), "{}", reason.message());
+        assert!(!manager.is_daemon_alive());
+
+        base.chmod(0o700);
+        assert_eq!(manager.check_running().unwrap_err().code(), "daemon_not_running");
     }
 }

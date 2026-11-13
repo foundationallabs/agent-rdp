@@ -14,6 +14,9 @@ pub enum IpcError {
 
     #[error("Socket path already exists")]
     SocketExists,
+
+    #[error(transparent)]
+    Path(#[from] crate::paths::PathsError),
 }
 
 /// Platform-specific IPC stream type alias.
@@ -39,12 +42,17 @@ impl IpcServer {
     /// Bind to the given socket path (Unix) or derive a port (Windows).
     #[cfg(unix)]
     pub async fn bind(path: &Path) -> Result<Self, IpcError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::paths::check_socket_path_len(path)?;
+
         // Remove existing socket file if present
         if path.exists() {
             std::fs::remove_file(path)?;
         }
 
         let listener = tokio::net::UnixListener::bind(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(crate::paths::PRIVATE_FILE_MODE))?;
         let address = path.display().to_string();
 
         info!("IPC server listening on {}", address);
@@ -116,5 +124,30 @@ impl IpcStreamExt for IpcStream {
 
     fn split(self) -> (Self::Read, Self::Write) {
         tokio::io::split(self)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn socket_is_0600() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("socket");
+        let _server = IpcServer::bind(&path).await.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, crate::paths::PRIVATE_FILE_MODE);
+    }
+
+    #[tokio::test]
+    async fn overlong_socket_path_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("x".repeat(120)).join("socket");
+        assert!(matches!(
+            IpcServer::bind(&path).await,
+            Err(IpcError::Path(crate::paths::PathsError::SocketPathTooLong { .. }))
+        ));
     }
 }
