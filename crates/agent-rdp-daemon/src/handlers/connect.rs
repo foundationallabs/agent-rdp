@@ -8,17 +8,58 @@ use tracing::{info, warn};
 
 use crate::automation::{AutomationBootstrap, SharedAutomationState, SharedDvcState};
 use crate::daemon::{ClipboardChangedRx, SharedWsHandle};
-use crate::rdp_session::{DisconnectNotify, RdpConfig, RdpSession};
+use crate::rdp_session::{ConnectTrace, DisconnectNotify, RdpConfig, RdpError, RdpSession};
+use crate::tls::CertPin;
 use crate::ws_server::{get_stream_fps, WsServer, WsServerConfig};
+
+/// The response for a failed connect, carrying its phases and where the credentials left. See
+/// [`RdpError::connect_error_code`].
+fn connect_error_response(error: &RdpError, trace: ConnectTrace) -> Response {
+    let mut response = match error {
+        RdpError::AuthenticationFailed(reason) => {
+            Response::authentication_failed(Some(*reason), error.to_string())
+        }
+        _ => Response::error(error.connect_error_code(), error.to_string()),
+    };
+    if let Some(info) = response.error.as_mut() {
+        let (phases, credential_boundary) = trace.into_parts();
+        info.phases = Some(phases);
+        info.credential_boundary = Some(credential_boundary);
+    }
+    response
+}
+
+/// The response for a connect that succeeded, carrying its phases and where the credentials left.
+fn connected_response(host: String, width: u16, height: u16, trace: ConnectTrace) -> Response {
+    let (phases, credential_boundary) = trace.into_parts();
+    Response::success(ResponseData::Connected {
+        host,
+        width,
+        height,
+        phases: Some(phases),
+        credential_boundary: Some(credential_boundary),
+    })
+}
+
+/// Parse the request's server certificate pin, if it has one.
+fn parse_cert_pin(params: &ConnectRequest) -> Result<Option<CertPin>, Response> {
+    params
+        .server_cert_pin
+        .as_deref()
+        .map(CertPin::parse)
+        .transpose()
+        .map_err(|e| Response::error(ErrorCode::InvalidRequest, e.to_string()))
+}
 
 /// Map a connect request onto the RDP session configuration.
 ///
 /// `drives` is passed separately because the handler appends the automation drive to the
-/// request's own drive list before connecting.
+/// request's own drive list before connecting. The pin is parsed before anything else.
 fn build_rdp_config(
     params: ConnectRequest,
     drives: Vec<DriveMapping>,
     automation_dvc_state: Option<SharedDvcState>,
+    server_cert_pin: Option<CertPin>,
 ) -> RdpConfig {
     RdpConfig {
         host: params.host,
@@ -32,6 +73,8 @@ fn build_rdp_config(
         height: params.height,
         drives,
         automation_dvc_state,
+        server_cert_pin,
+        acknowledge_logon_notice: params.acknowledge_logon_notice,
     }
 }
 
@@ -50,6 +93,12 @@ pub async fn handle(
     let stream_fps = params.stream_fps;
     let stream_quality = params.stream_quality;
     let serve_viewer = params.serve_viewer;
+
+    // Reject a malformed pin before touching the existing session
+    let server_cert_pin = match parse_cert_pin(&params) {
+        Ok(pin) => pin,
+        Err(response) => return response,
+    };
 
     // Auto-disconnect if already connected (handles stale/dropped connections)
     {
@@ -113,18 +162,13 @@ pub async fn handle(
     };
 
     // Build configuration
-    let config = build_rdp_config(params, drives, automation_dvc_state);
+    let config = build_rdp_config(params, drives, automation_dvc_state, server_cert_pin);
 
     // Attempt connection
-    let rdp = match RdpSession::connect(config, Some(disconnect_notify)).await {
+    let mut trace = ConnectTrace::default();
+    let rdp = match RdpSession::connect(config, Some(disconnect_notify), &mut trace).await {
         Ok(rdp) => rdp,
-        Err(e) => {
-            let code = match &e {
-                crate::rdp_session::RdpError::AuthenticationFailed => ErrorCode::AuthenticationFailed,
-                _ => ErrorCode::ConnectionFailed,
-            };
-            return Response::error(code, e.to_string());
-        }
+        Err(e) => return connect_error_response(&e, trace),
     };
 
     let host = rdp.host();
@@ -203,11 +247,7 @@ pub async fn handle(
         }
     }
 
-    Response::success(ResponseData::Connected {
-        host,
-        width,
-        height,
-    })
+    connected_response(host, width, height, trace)
 }
 
 /// Handle a disconnect request.
@@ -254,7 +294,117 @@ pub async fn handle_disconnect(
 
 #[cfg(test)]
 mod tests {
+    use agent_rdp_protocol::{
+        AuthFailureReason, ConnectPhase, ConnectPhaseName, CredentialBoundary, PhaseOutcome,
+    };
+
     use super::*;
+
+    fn phase(phase: ConnectPhaseName, outcome: PhaseOutcome) -> ConnectPhase {
+        ConnectPhase {
+            phase,
+            started_at_ms: 1_760_000_000_000,
+            ms: 7,
+            outcome,
+            detail: None,
+        }
+    }
+
+    fn logon_trace(last: PhaseOutcome) -> (ConnectTrace, Vec<ConnectPhase>) {
+        let phases = vec![
+            phase(ConnectPhaseName::RdpConnect, PhaseOutcome::Ok),
+            phase(ConnectPhaseName::Logon, last),
+        ];
+        let trace = ConnectTrace::recorded(phases.clone(), CredentialBoundary::Logon);
+        (trace, phases)
+    }
+
+    #[test]
+    fn failed_connect_carries_its_phases_and_credential_boundary() {
+        let (trace, phases) = logon_trace(PhaseOutcome::Failed);
+        let response = connect_error_response(
+            &RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed),
+            trace,
+        );
+        let error = response.error.unwrap();
+        assert_eq!(error.phases, Some(phases));
+        assert_eq!(error.credential_boundary, Some(CredentialBoundary::Logon));
+    }
+
+    #[test]
+    fn successful_connect_carries_its_phases_and_credential_boundary() {
+        let (trace, phases) = logon_trace(PhaseOutcome::Ok);
+        let response = connected_response("10.0.0.5".to_string(), 1920, 1080, trace);
+        let Some(ResponseData::Connected {
+            phases: reported,
+            credential_boundary,
+            ..
+        }) = response.data
+        else {
+            panic!("expected connected data");
+        };
+        assert_eq!(reported, Some(phases));
+        assert_eq!(credential_boundary, Some(CredentialBoundary::Logon));
+    }
+
+    #[test]
+    fn refused_login_is_authentication_failed_with_reason() {
+        let response = connect_error_response(
+            &RdpError::AuthenticationFailed(AuthFailureReason::AccountLockedOut),
+            ConnectTrace::default(),
+        );
+        let error = response.error.unwrap();
+        assert_eq!(error.code, ErrorCode::AuthenticationFailed);
+        assert_eq!(error.reason, Some(AuthFailureReason::AccountLockedOut));
+    }
+
+    #[test]
+    fn other_connect_failures_are_connection_failed() {
+        for error in [
+            RdpError::ConnectionFailed("refused".to_string()),
+            RdpError::TlsError("handshake".to_string()),
+        ] {
+            let error = connect_error_response(&error, ConnectTrace::default())
+                .error
+                .unwrap();
+            assert_eq!(error.code, ErrorCode::ConnectionFailed);
+            assert_eq!(error.reason, None);
+        }
+    }
+
+    #[test]
+    fn pin_mismatch_is_certificate_mismatch() {
+        let error = connect_error_response(
+            &RdpError::CertificateMismatch("key".to_string()),
+            ConnectTrace::default(),
+        )
+        .error
+        .unwrap();
+        assert_eq!(error.code, ErrorCode::CertificateMismatch);
+        assert_eq!(error.reason, None);
+    }
+
+    #[test]
+    fn server_cert_pin_is_parsed_or_refused() {
+        let pin = "sha256/v0ED3aaQaqkZx0eWMgIKcV21wFokPfvCkSa1dZpbHNA=";
+        let params = ConnectRequest {
+            server_cert_pin: Some(pin.to_string()),
+            ..Default::default()
+        };
+        let parsed = parse_cert_pin(&params).unwrap().unwrap();
+        assert_eq!(parsed.to_string(), pin);
+        let config = build_rdp_config(params, Vec::new(), None, Some(parsed.clone()));
+        assert_eq!(config.server_cert_pin, Some(parsed));
+
+        assert_eq!(parse_cert_pin(&ConnectRequest::default()).unwrap(), None);
+
+        let malformed = ConnectRequest {
+            server_cert_pin: Some("sha256/short".to_string()),
+            ..Default::default()
+        };
+        let error = parse_cert_pin(&malformed).unwrap_err().error.unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
 
     fn drive(name: &str) -> DriveMapping {
         DriveMapping {
@@ -278,7 +428,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = build_rdp_config(params, vec![drive("docs"), drive("auto")], None);
+        let config = build_rdp_config(params, vec![drive("docs"), drive("auto")], None, None);
 
         assert_eq!(config.host, "10.0.0.5");
         assert_eq!(config.port, 4489);
@@ -294,7 +444,7 @@ mod tests {
 
     #[test]
     fn rdp_config_enable_credssp_defaults_to_true() {
-        let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None);
+        let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None, None);
         assert!(config.enable_credssp);
     }
 
@@ -304,13 +454,13 @@ mod tests {
             enable_credssp: Some(false),
             ..Default::default()
         };
-        let config = build_rdp_config(params, Vec::new(), None);
+        let config = build_rdp_config(params, Vec::new(), None, None);
         assert!(!config.enable_credssp);
     }
 
     #[test]
     fn rdp_config_alternate_shell_none_when_unset() {
-        let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None);
+        let config = build_rdp_config(ConnectRequest::default(), Vec::new(), None, None);
         assert_eq!(config.alternate_shell, None);
     }
 }

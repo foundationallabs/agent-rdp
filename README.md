@@ -2,6 +2,8 @@
 
 A CLI tool for AI agents to control Windows Remote Desktop sessions, built on [IronRDP](https://github.com/Devolutions/IronRDP).
 
+This is Pace's maintained fork of [thisnick/agent-rdp](https://github.com/thisnick/agent-rdp), published as `@foundationallabs/agent-rdp`. It is developed independently and does not track upstream.
+
 ## Demo
 
 Claude Code automating SQLite database and table creation via RDP:
@@ -32,13 +34,13 @@ npm install -g @foundationallabs/agent-rdp
 ### As a Claude Code skill
 
 ```bash
-npx add-skill https://github.com/thisnick/agent-rdp
+npx add-skill https://github.com/foundationallabs/agent-rdp
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/thisnick/agent-rdp
+git clone https://github.com/foundationallabs/agent-rdp
 cd agent-rdp
 pnpm install
 pnpm build      # Build native binary
@@ -184,13 +186,15 @@ agent-rdp connect --host psm.example.com -u user -p secret \
   --alternate-shell 'psm /u user@domain /a target /c PSM-RDP'
 ```
 
-The value can also come from the `AGENT_RDP_ALTERNATE_SHELL` environment variable. PSM deployments that require NLA to be off (TLS security only) can add `--no-nla` (SDK: `enableNla: false`).
+The value can also come from the `AGENT_RDP_ALTERNATE_SHELL` environment variable. PSM deployments that require NLA to be off (TLS security only) can add `--no-nla` (SDK: `enableNla: false`). With NLA off, Windows checks the password inside the session, so `connect` waits up to 20 s after sending the credentials for the server to confirm the login and fails with `authentication_failed` (reason `logon_unconfirmed`) if it does not. A connection that ends after the credentials were sent and before the confirmation fails the same way, since the server may have counted the attempt. Failures before the credentials leave the client stay connection errors (`connection_failed`, or `certificate_mismatch` for a pin mismatch). A `SESSION_CONTINUE` logon notice, which Windows sends with the session ID during good logons, does not confirm or fail the login.
+
+agent-rdp does not follow Server Redirection and never advertises support for it. An RD Connection Broker farm therefore places the session on the host you dial, and does not reattach a disconnected session on another host.
 
 ### UI Automation
 
 Interact with Windows applications programmatically via the Windows UI Automation API using native patterns (InvokePattern, SelectionItemPattern, TogglePattern, etc.). When enabled, a PowerShell agent is injected into the remote session that captures the accessibility tree and performs actions. Communication between the CLI and the agent uses a Dynamic Virtual Channel (DVC) for fast bidirectional IPC.
 
-For detailed documentation, see [AUTOMATION.md](https://github.com/thisnick/agent-rdp/blob/main/docs/AUTOMATION.md).
+For detailed documentation, see [AUTOMATION.md](https://github.com/foundationallabs/agent-rdp/blob/main/docs/AUTOMATION.md).
 
 ```bash
 # Connect with automation enabled
@@ -422,10 +426,10 @@ const rdp = new RdpSession({
 await rdp.connect({...});
 
 // Connect your WebSocket client to receive JPEG frames
-const streamUrl = rdp.getStreamUrl(); // "ws://localhost:9224"
+const streamUrl = rdp.getStreamUrl(); // "ws://127.0.0.1:9224"
 ```
 
-For the complete WebSocket protocol specification (message types, clipboard flow, input handling), see [WEBSOCKET.md](https://github.com/thisnick/agent-rdp/blob/main/docs/WEBSOCKET.md).
+For the complete WebSocket protocol specification (message types, clipboard flow, input handling), see [WEBSOCKET.md](https://github.com/foundationallabs/agent-rdp/blob/main/docs/WEBSOCKET.md).
 
 ## Architecture
 

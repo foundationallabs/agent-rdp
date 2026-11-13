@@ -7,9 +7,11 @@ pub mod automation;
 pub mod daemon;
 pub mod handlers;
 pub mod ipc_server;
+pub mod logon;
 pub mod ocr;
 pub mod rdp_session;
 pub mod rdpdr;
+pub mod tls;
 pub mod ws_input;
 pub mod ws_server;
 

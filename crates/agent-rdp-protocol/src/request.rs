@@ -60,7 +60,8 @@ pub struct DriveMapping {
 }
 
 /// RDP connection parameters.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+// `Debug` is implemented by hand to redact the password.
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/agent-rdp/src/generated/")]
 pub struct ConnectRequest {
     /// Server hostname or IP address.
@@ -91,6 +92,20 @@ pub struct ConnectRequest {
     #[serde(default)]
     #[ts(optional)]
     pub enable_credssp: Option<bool>,
+
+    /// Required server key: `sha256/<base64>` of the certificate's DER SubjectPublicKeyInfo.
+    /// When set, the TLS handshake fails with `certificate_mismatch` unless the server holds
+    /// that key. When unset, any server certificate is accepted.
+    #[serde(default)]
+    #[ts(optional)]
+    pub server_cert_pin: Option<String>,
+
+    /// When the server skips NLA and has not confirmed the login 5 s after the connection came
+    /// up, press Enter once to dismiss a Windows pre-logon notice (the "legal notice" policy)
+    /// and keep waiting (default: false). The press goes to whatever screen has focus: on a host
+    /// that discards the sent password and shows its sign-in prompt, it submits an empty password.
+    #[serde(default)]
+    pub acknowledge_logon_notice: bool,
 
     /// Desktop width in pixels.
     pub width: u16,
@@ -129,6 +144,50 @@ fn default_stream_quality() -> u8 {
     80
 }
 
+impl std::fmt::Debug for ConnectRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure so a new field fails to compile here instead of going unprinted.
+        let Self {
+            host,
+            port,
+            username,
+            password: _,
+            domain,
+            alternate_shell,
+            enable_credssp,
+            server_cert_pin,
+            acknowledge_logon_notice,
+            width,
+            height,
+            drives,
+            enable_win_automation,
+            stream_port,
+            stream_fps,
+            stream_quality,
+            serve_viewer,
+        } = self;
+        f.debug_struct("ConnectRequest")
+            .field("host", host)
+            .field("port", port)
+            .field("username", username)
+            .field("password", &"<redacted>")
+            .field("domain", domain)
+            .field("alternate_shell", alternate_shell)
+            .field("enable_credssp", enable_credssp)
+            .field("server_cert_pin", server_cert_pin)
+            .field("acknowledge_logon_notice", acknowledge_logon_notice)
+            .field("width", width)
+            .field("height", height)
+            .field("drives", drives)
+            .field("enable_win_automation", enable_win_automation)
+            .field("stream_port", stream_port)
+            .field("stream_fps", stream_fps)
+            .field("stream_quality", stream_quality)
+            .field("serve_viewer", serve_viewer)
+            .finish()
+    }
+}
+
 impl Default for ConnectRequest {
     fn default() -> Self {
         Self {
@@ -139,6 +198,8 @@ impl Default for ConnectRequest {
             domain: None,
             alternate_shell: None,
             enable_credssp: None,
+            server_cert_pin: None,
+            acknowledge_logon_notice: false,
             width: 1280,
             height: 800,
             drives: Vec::new(),
@@ -383,6 +444,74 @@ mod tests {
             "width":1280,"height":800}"#;
         match serde_json::from_str::<Request>(json).unwrap() {
             Request::Connect(c) => assert_eq!(c.enable_credssp, None),
+            _ => panic!("unexpected request type"),
+        }
+    }
+
+    #[test]
+    fn test_connect_debug_redacts_the_password() {
+        let req = Request::Connect(ConnectRequest {
+            username: "admin".to_string(),
+            password: "hunter2-secret".to_string(),
+            ..Default::default()
+        });
+
+        let debug = format!("{req:?}");
+        assert!(!debug.contains("hunter2-secret"), "{debug}");
+        assert!(debug.contains("password: \"<redacted>\""), "{debug}");
+        assert!(debug.contains("username: \"admin\""), "{debug}");
+
+        let json = serde_json::to_string(&req).unwrap();
+        match serde_json::from_str::<Request>(&json).unwrap() {
+            Request::Connect(c) => assert_eq!(c.password, "hunter2-secret"),
+            _ => panic!("unexpected request type"),
+        }
+    }
+
+    #[test]
+    fn test_connect_server_cert_pin_round_trip() {
+        let pin = "sha256/v0ED3aaQaqkZx0eWMgIKcV21wFokPfvCkSa1dZpbHNA=";
+        let req = Request::Connect(ConnectRequest {
+            server_cert_pin: Some(pin.to_string()),
+            ..Default::default()
+        });
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"server_cert_pin\""));
+        match serde_json::from_str::<Request>(&json).unwrap() {
+            Request::Connect(c) => assert_eq!(c.server_cert_pin.as_deref(), Some(pin)),
+            _ => panic!("unexpected request type"),
+        }
+    }
+
+    #[test]
+    fn test_connect_without_server_cert_pin_deserializes_to_none() {
+        // Payload from a client that predates `server_cert_pin`.
+        let json = r#"{"type":"connect","host":"h","port":3389,"username":"u","password":"p",
+            "width":1280,"height":800}"#;
+        match serde_json::from_str::<Request>(json).unwrap() {
+            Request::Connect(c) => assert_eq!(c.server_cert_pin, None),
+            _ => panic!("unexpected request type"),
+        }
+    }
+
+    #[test]
+    fn test_connect_acknowledge_logon_notice_defaults_off_and_round_trips() {
+        // Payload from a client that predates `acknowledge_logon_notice`.
+        let json = r#"{"type":"connect","host":"h","port":3389,"username":"u","password":"p",
+            "width":1280,"height":800}"#;
+        match serde_json::from_str::<Request>(json).unwrap() {
+            Request::Connect(c) => assert!(!c.acknowledge_logon_notice),
+            _ => panic!("unexpected request type"),
+        }
+
+        let req = Request::Connect(ConnectRequest {
+            acknowledge_logon_notice: true,
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&req).unwrap();
+        match serde_json::from_str::<Request>(&json).unwrap() {
+            Request::Connect(c) => assert!(c.acknowledge_logon_notice),
             _ => panic!("unexpected request type"),
         }
     }

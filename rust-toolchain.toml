@@ -1,0 +1,4 @@
+# Pinned so CI and release builds use the toolchain the tests ran on. Bump deliberately.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"

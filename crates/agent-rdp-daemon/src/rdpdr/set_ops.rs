@@ -8,6 +8,7 @@ use ironrdp_rdpdr::pdu::RdpdrPdu;
 use ironrdp_svc::SvcMessage;
 use tracing::{debug, warn};
 
+use super::path::resolve_in_drive;
 use super::MultiDriveBackend;
 
 /// Handle set information request (rename, delete, truncate, etc.).
@@ -49,9 +50,16 @@ pub fn set_information(
                         }
                     };
 
-                    let new_path = info.file_name.replace('\\', "/");
-                    let new_path = new_path.trim_start_matches('/');
-                    let to = base_path.join(new_path);
+                    let to = match resolve_in_drive(&base_path, &info.file_name) {
+                        Ok(path) => path,
+                        Err(status) => {
+                            let res = RdpdrPdu::ClientDriveSetInformationResponse(
+                                ClientDriveSetInformationResponse::new(&req_inner, status)
+                                    .map_err(|e| encode_err!(e))?,
+                            );
+                            return Ok(vec![SvcMessage::from(res)]);
+                        }
+                    };
 
                     if let Err(error) = fs::rename(file_path, &to) {
                         warn!(

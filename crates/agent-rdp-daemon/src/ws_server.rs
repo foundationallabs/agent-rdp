@@ -6,6 +6,7 @@
 //! Also serves the embedded viewer HTML on regular HTTP requests.
 
 use std::collections::HashSet;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -131,9 +132,9 @@ impl WsServer {
         &self,
         rdp_session: Arc<tokio::sync::Mutex<Option<RdpSession>>>,
     ) -> anyhow::Result<WsServerHandle> {
-        let addr = format!("0.0.0.0:{}", self.port);
-        let listener = TcpListener::bind(&addr).await?;
-        info!("WebSocket server listening on ws://{}", addr);
+        let listener = bind_loopback(self.port).await?;
+        let local_addr = listener.local_addr()?;
+        info!("WebSocket server listening on ws://{}", local_addr);
 
         // Create broadcast channel
         let (broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(16);
@@ -192,6 +193,7 @@ impl WsServer {
             broadcast_tx: broadcast_tx_clone,
             clients: Arc::clone(&self.clients),
             jpeg_quality: self.jpeg_quality,
+            local_addr,
         })
     }
 }
@@ -201,9 +203,15 @@ pub struct WsServerHandle {
     broadcast_tx: tokio::sync::broadcast::Sender<String>,
     clients: Arc<Mutex<HashSet<ClientId>>>,
     jpeg_quality: u8,
+    local_addr: SocketAddr,
 }
 
 impl WsServerHandle {
+    /// The address the server listens on.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
     /// Check if there are any connected clients.
     pub fn has_clients(&self) -> bool {
         !self.clients.lock().is_empty()
@@ -587,9 +595,30 @@ pub fn get_stream_quality() -> u8 {
         .unwrap_or(80)
 }
 
+/// Bind the stream port on loopback only: the stream is unauthenticated and carries full
+/// input control, and its one consumer (the session manager's proxy) runs on the same host.
+async fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stream_server_listens_on_loopback_only() {
+        let server = WsServer::new(WsServerConfig {
+            port: 0,
+            fps: 10,
+            jpeg_quality: 80,
+            serve_viewer: false,
+        });
+        let handle = server
+            .start(Arc::new(tokio::sync::Mutex::new(None)))
+            .await
+            .unwrap();
+        assert_eq!(handle.local_addr().ip(), Ipv4Addr::LOCALHOST);
+    }
 
     #[test]
     fn stream_fps_request_beats_env_and_default() {

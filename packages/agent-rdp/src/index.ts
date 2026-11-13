@@ -42,6 +42,7 @@ import {
   OcrMatch,
   Request,
   Response,
+  ResponseData,
   RdpError,
 } from './types.js';
 
@@ -54,7 +55,7 @@ export interface RdpSessionOptions {
   session?: string;
   /** Request timeout in milliseconds (default: 30000) */
   timeout?: number;
-  /** WebSocket streaming port (0 = disabled). Connect to ws://localhost:<port> for frames. */
+  /** WebSocket streaming port (0 = disabled). Connect to ws://127.0.0.1:<port> for frames. */
   streamPort?: number;
   /** Serve the embedded HTML viewer on the streaming port (default: false). */
   serveViewer?: boolean;
@@ -234,6 +235,8 @@ export class RdpSession {
    * @param options.domain Optional domain
    * @param options.alternateShell Optional alternate shell to start instead of the desktop
    * @param options.enableNla Use NLA/CredSSP (default: true); false = TLS security only
+   * @param options.serverCertPin Required server key, `sha256/<base64>` of its SubjectPublicKeyInfo
+   * @param options.acknowledgeLogonNotice When the server skips NLA, press Enter once at a pre-logon notice
    * @param options.width Desktop width (default: 1280)
    * @param options.height Desktop height (default: 800)
    * @param options.drives Drives to map
@@ -252,6 +255,8 @@ export class RdpSession {
       domain: options.domain,
       alternate_shell: options.alternateShell,
       enable_credssp: options.enableNla,
+      server_cert_pin: options.serverCertPin,
+      acknowledge_logon_notice: options.acknowledgeLogonNotice ?? false,
       width: options.width ?? 1280,
       height: options.height ?? 800,
       drives: options.drives ?? [],
@@ -263,12 +268,14 @@ export class RdpSession {
     };
 
     const response = await this._send(request);
-    const data = response.data as { type: 'connected'; host: string; width: number; height: number };
+    const data = response.data as Extract<ResponseData, { type: 'connected' }>;
 
     return {
       host: data.host,
       width: data.width,
       height: data.height,
+      phases: data.phases,
+      credentialBoundary: data.credential_boundary,
     };
   }
 
@@ -388,7 +395,7 @@ export class RdpSession {
     if (this.streamPort === 0) {
       return null;
     }
-    return `ws://localhost:${this.streamPort}`;
+    return `ws://127.0.0.1:${this.streamPort}`;
   }
 
   /**
@@ -407,6 +414,9 @@ export class RdpSession {
       throw new RdpError(
         response.error?.code ?? 'internal_error',
         response.error?.message ?? 'Unknown error',
+        response.error?.reason,
+        response.error?.phases,
+        response.error?.credential_boundary,
       );
     }
 

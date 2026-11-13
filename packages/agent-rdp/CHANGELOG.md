@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.0 (2026-10-29)
+
+
+### Features
+
+* `connect` gains the opt-in `acknowledge_logon_notice` (CLI `--acknowledge-logon-notice`, SDK `acknowledgeLogonNotice`). When the server skips NLA and Windows has not confirmed the logon 5 s after the connection came up, agent-rdp presses Enter once, which dismisses a Windows pre-logon notice (the "legal notice" policy) through its default OK button, then keeps waiting until the usual 20 s deadline. Without it, such a notice holds the logon until `connect` fails as `logon_unconfirmed`. Only one press, because a second Enter on a sign-in screen could submit an empty password. The press is blind: on a host that discards the sent password and shows its sign-in prompt (the "Always prompt for password" policy), that one Enter submits an empty password, which can count as a failed logon. Off by default; with it off, `connect` behaves exactly as in 0.8.0.
+* `connect` reports its phases: `dns`, `tcp`, `rdp_negotiate`, `tls`, `rdp_connect` and, when the server skips NLA, `logon`. Each phase has its start time (`started_at_ms`, Unix ms), duration, outcome (`ok`, `failed`, `timed_out`) and an allowlisted detail: resolved addresses, the address tried, the security protocol the server selected, the server key's SPKI pin and whether it matched `server_cert_pin`, and the error code of a failed phase. With NLA off, `rdp_connect` ends when the Client Info PDU carries the credentials, and `logon` runs from there until Windows confirms the login. Success carries them in the `connected` data and a failed connect in `error.phases`, ending with the phase that failed. SDK: `ConnectResult.phases` and `RdpError.phases`. The detail never holds a username, password or screen content.
+* `connect` reports `credential_boundary`, the first phase in which the credentials may have reached the server: `logon` with NLA off, `rdp_connect` with NLA on (CredSSP sends them at a point agent-rdp cannot observe, so the whole phase counts), or `none` when the connect ended before that. A failed connect with `none` cannot have cost a login attempt. SDK: `ConnectResult.credentialBoundary` and `RdpError.credentialBoundary`.
+
+### Behavior Changes
+
+* The phases before the credentials are sent now time out: DNS after 5 s, TCP connect, RDP negotiation and the TLS handshake after 10 s each, and with NLA off the connection sequence up to the Client Info PDU after 10 s. The TCP limit is a total across all the addresses the host resolved to, which are tried in turn within it. A timeout fails the connect as `connection_failed`, never `authentication_failed`, because the server has not seen the password. Previously a silently dropped TCP connect waited for the OS timeout (often over a minute), and a server that stalled before the credentials held `connect` until the caller gave up. Together with the 20 s login window a connect can take up to about 65 s, so a caller that wants the result passes a `timeout` above the SDK's 30 s default.
+* With NLA on, a connection sequence (CredSSP onwards) that takes over 20 s fails closed as `authentication_failed` with reason `logon_unconfirmed`, as an unconfirmed NLA-off login does, because CredSSP may already have sent the credentials. Previously it had no limit.
+
+## 0.8.0 (2026-10-09)
+
+
+### Behavior Changes
+
+* When the server selects TLS-only security (no CredSSP), `connect` fails closed unless Windows confirms the logon within 20 s of the credentials being sent: it ends the session and returns `authentication_failed` with the new reason `logon_unconfirmed`. Previously it returned connected with the login outcome unknown. Connects where the server selects CredSSP are unchanged.
+* In that mode, a connection that ends after the credentials were sent and before Windows confirms the logon (server close, TCP reset, TLS close, a stalled connection sequence) also returns `authentication_failed` / `logon_unconfirmed`, since the server may have counted a login attempt. Previously it returned `connection_failed`, which callers may retry. Failures before the credentials are sent stay `connection_failed`.
+* A `SESSION_CONTINUE` logon notice no longer fails the login. Windows sends it during good logons with the session ID in its data field, which IronRDP decodes as a logon error code for IDs 0-3, so 0.7.x reported a good logon to session 1 or 2 as `authentication_failed`. The daemon now logs that field as `session_id`.
+* SDK: `AuthFailureReason` gains the member `"logon_unconfirmed"`. TypeScript code with an exhaustive `switch` over it needs a new case.
+* Unchanged from 0.7.x, now pinned by a test: the client never advertises Server Redirection support. agent-rdp does not follow redirects, and without that flag an RD Connection Broker farm places the session on the dialled host.
+
+## 0.7.2 (2026-10-08)
+
+
+### Bug Fixes
+
+* Wait for the logon whenever the server skips CredSSP, not only when `--no-nla` is set.
+* The SDK stream URL points at 127.0.0.1, matching the stream server's bind address.
+* Redirected drives answer every directory information class Windows asks for, skip symlinks, and report directory sizes as 0.
+
 ## [0.6.5](https://github.com/thisnick/agent-rdp/compare/agent-rdp-v0.6.4...agent-rdp-v0.6.5) (2026-02-26)
 
 

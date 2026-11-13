@@ -7,10 +7,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.9.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/anthropics/agent-rdp"
+repository = "https://github.com/foundationallabs/agent-rdp"
 rust-version = "1.75"
 
 [workspace.dependencies]
@@ -47,6 +47,7 @@ x509-cert = "0.2"
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
+ring = "0.17"
 webpki-roots = "0.26"
 
 # Image processing

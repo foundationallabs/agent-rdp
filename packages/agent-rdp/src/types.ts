@@ -27,6 +27,13 @@ export type {
   ResponseData,
   ErrorCode,
   ErrorInfo,
+  AuthFailureReason,
+  ConnectPhase,
+  ConnectPhaseDetail,
+  ConnectPhaseName,
+  CredentialBoundary,
+  PhaseOutcome,
+  SelectedProtocol,
   SessionInfo,
   SessionSummary,
   MappedDrive,
@@ -63,7 +70,13 @@ export type {
 // --- SDK Convenience Types ---
 // These are higher-level types for the SDK API, not IPC.
 
-import type { DriveMapping, ErrorCode } from './generated/index.js';
+import type {
+  AuthFailureReason,
+  ConnectPhase,
+  CredentialBoundary,
+  DriveMapping,
+  ErrorCode,
+} from './generated/index.js';
 
 /** Options for connecting to an RDP session. */
 export interface ConnectOptions {
@@ -82,6 +95,19 @@ export interface ConnectOptions {
    * TLS security (RDP `enablecredsspsupport:i:0`), as some CyberArk PSM deployments do.
    */
   enableNla?: boolean;
+  /**
+   * Required server key: `sha256/<base64>` of the certificate's DER SubjectPublicKeyInfo. When
+   * set, connect fails with `certificate_mismatch` unless the server holds that key.
+   */
+  serverCertPin?: string;
+  /**
+   * When the server skips NLA (as with `enableNla: false`): press Enter once if it has not
+   * confirmed the login 5 s after connecting, to dismiss a Windows pre-logon notice (the "legal notice" policy), which
+   * otherwise holds the login until it fails as `logon_unconfirmed` (default: false). The press
+   * goes to whatever screen has focus: on a host that discards the sent password and shows its
+   * sign-in prompt, it submits an empty password.
+   */
+  acknowledgeLogonNotice?: boolean;
   width?: number;
   height?: number;
   drives?: DriveMapping[];
@@ -94,6 +120,10 @@ export interface ConnectResult {
   host: string;
   width: number;
   height: number;
+  /** The phases of the connect, in order. Absent from a daemon that predates them. */
+  phases?: ConnectPhase[];
+  /** Where the credentials left: `rdp_connect` with NLA on, `logon` with NLA off. */
+  credentialBoundary?: CredentialBoundary;
 }
 
 /** Options for taking a screenshot. */
@@ -197,6 +227,15 @@ export class RdpError extends Error {
   constructor(
     public code: ErrorCode,
     message: string,
+    /** Why the login failed, when known. Only set with `authentication_failed`. */
+    public reason?: AuthFailureReason,
+    /** For a failed connect: its phases, ending with the one that failed. */
+    public phases?: ConnectPhase[],
+    /**
+     * For a failed connect: the first phase in which the credentials may have reached the server,
+     * or `none` when the connect cannot have cost a login attempt.
+     */
+    public credentialBoundary?: CredentialBoundary,
   ) {
     super(message);
     this.name = 'RdpError';

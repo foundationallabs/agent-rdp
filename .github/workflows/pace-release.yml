@@ -12,6 +12,37 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust
+        run: sh scripts/install-rust.sh
+
+      - name: Test Rust
+        run: cargo test --locked --workspace
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@eae0cfeb286e66ffb5155f1a79b90583a127a68b # v2.4.1
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm install --ignore-scripts
+
+      - name: Build TypeScript
+        run: pnpm --filter ./packages/agent-rdp run build:ts
+
+      - name: Test TypeScript
+        run: pnpm --filter ./packages/agent-rdp run test
+
   # Linux builds run in an ubuntu:22.04 container (glibc 2.35) for broad compatibility.
   # Without this, ubuntu-latest (24.04) produces binaries requiring glibc 2.39+.
   build-linux:
@@ -35,17 +66,19 @@ jobs:
           apt-get update
           apt-get install -y curl build-essential pkg-config cmake
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          . "$HOME/.cargo/env"
+          sh scripts/install-rust.sh --target ${{ matrix.target }}
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Build
         run: |
           . "$HOME/.cargo/env"
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Copy binary and models to package
         run: |
@@ -56,7 +89,7 @@ jobs:
           cp models/*.rten packages/${{ matrix.package }}/models/
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.package }}
           path: packages/${{ matrix.package }}/
@@ -65,15 +98,13 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
+        run: sh scripts/install-rust.sh --target aarch64-apple-darwin
 
       - name: Build
-        run: cargo build --release --target aarch64-apple-darwin
+        run: cargo build --release --locked --target aarch64-apple-darwin
 
       - name: Copy binary and models to package
         run: |
@@ -84,25 +115,36 @@ jobs:
           cp models/*.rten packages/darwin-arm64/models/
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: darwin-arm64
           path: packages/darwin-arm64/
 
   publish:
-    needs: [build-linux, build-darwin]
+    needs: [test, build-linux, build-darwin]
     # Publish only from a tag, including manual runs; a branch dispatch builds but does not publish.
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    environment: npm-publish
     permissions:
       contents: read
       id-token: write # npm trusted publishing (OIDC) and provenance
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # full history for the main-ancestry check
+
+      # main is the only release line: a tag on a side branch would publish code main does not hold.
+      - name: Check the tag is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "$GITHUB_REF_NAME ($GITHUB_SHA) is not on main; merge it to main and tag from there"
+            exit 1
+          fi
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
 
@@ -115,14 +157,14 @@ jobs:
           ls -la packages/*/bin/
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           # Trusted publishing needs npm >= 11.5.1; Node 24 bundles npm 11.
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v2
+        uses: pnpm/action-setup@eae0cfeb286e66ffb5155f1a79b90583a127a68b # v2.4.1
         with:
           version: 9
 

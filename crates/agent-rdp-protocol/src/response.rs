@@ -3,6 +3,7 @@
 use crate::automation::{
     AccessibilitySnapshot, AutomationStatus, ClickResult, ElementValue, RunResult, WindowInfo,
 };
+use crate::connect_trace::{ConnectPhase, CredentialBoundary};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ts_rs::TS;
@@ -52,6 +53,27 @@ impl Response {
             error: Some(ErrorInfo {
                 code,
                 message: message.into(),
+                reason: None,
+                phases: None,
+                credential_boundary: None,
+            }),
+        }
+    }
+
+    /// Create an `authentication_failed` error response.
+    pub fn authentication_failed(
+        reason: Option<AuthFailureReason>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            success: false,
+            data: None,
+            error: Some(ErrorInfo {
+                code: ErrorCode::AuthenticationFailed,
+                message: message.into(),
+                reason,
+                phases: None,
+                credential_boundary: None,
             }),
         }
     }
@@ -73,6 +95,14 @@ pub enum ResponseData {
         width: u16,
         /// Desktop height.
         height: u16,
+        /// The phases of the connect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        phases: Option<Vec<ConnectPhase>>,
+        /// Where the credentials left: `rdp_connect` with NLA on, `logon` with NLA off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        credential_boundary: Option<CredentialBoundary>,
     },
 
     /// Screenshot data.
@@ -246,6 +276,73 @@ pub struct ErrorInfo {
     pub code: ErrorCode,
     /// Human-readable error message.
     pub message: String,
+    /// Why the login failed, when known. Only set with `authentication_failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<AuthFailureReason>,
+    /// For a failed connect: its phases, ending with the one that failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phases: Option<Vec<ConnectPhase>>,
+    /// For a failed connect: the first phase in which the credentials may have reached the
+    /// server, or `none` when the connect cannot have cost a login attempt. Absent when the
+    /// request was rejected before connecting (an invalid pin, say) or the daemon predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub credential_boundary: Option<CredentialBoundary>,
+}
+
+/// Why a login failed.
+///
+/// CredSSP (NLA) failures carry the NTSTATUS the server returned; NLA-off failures carry the
+/// Save Session Info logon error (MS-RDPBCGR 2.2.10.1.1.4.1.1), or `logon_unconfirmed` when the
+/// server never confirmed the login (NLA off: silence, or the connection ended after the
+/// credentials were sent).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/agent-rdp/src/generated/")]
+#[serde(rename_all = "snake_case")]
+pub enum AuthFailureReason {
+    /// STATUS_LOGON_FAILURE: unknown user name or bad password.
+    LogonFailure,
+    /// STATUS_WRONG_PASSWORD.
+    WrongPassword,
+    /// STATUS_NO_SUCH_USER.
+    NoSuchUser,
+    /// STATUS_ACCOUNT_LOCKED_OUT.
+    AccountLockedOut,
+    /// STATUS_ACCOUNT_DISABLED.
+    AccountDisabled,
+    /// STATUS_ACCOUNT_RESTRICTION.
+    AccountRestriction,
+    /// STATUS_PASSWORD_EXPIRED.
+    PasswordExpired,
+    /// STATUS_PASSWORD_MUST_CHANGE.
+    PasswordMustChange,
+    /// STATUS_INVALID_LOGON_HOURS.
+    InvalidLogonHours,
+    /// STATUS_INVALID_WORKSTATION.
+    InvalidWorkstation,
+    /// STATUS_LOGON_NOT_GRANTED.
+    LogonNotGranted,
+    /// STATUS_LOGON_TYPE_NOT_GRANTED.
+    LogonTypeNotGranted,
+    /// SEC_E_LOGON_DENIED without a more specific status.
+    LogonDenied,
+    /// CredSSP early user authorization result, or the logon error type ACCESS_DENIED.
+    AccessDenied,
+    /// NLA off: LOGON_FAILED_BAD_PASSWORD.
+    LogonFailedBadPassword,
+    /// NLA off: LOGON_FAILED_UPDATE_PASSWORD.
+    LogonFailedUpdatePassword,
+    /// NLA off: LOGON_FAILED_OTHER.
+    LogonFailedOther,
+    /// NLA off: LOGON_MSG_NO_PERMISSION.
+    NoPermission,
+    /// NLA off: no logon notification (Logon Info or Plain Notify) arrived within the logon
+    /// window, or the connection ended after the credentials were sent and before one arrived, so
+    /// the login is treated as failed. Windows sends none for a wrong password on some hosts, and
+    /// the server may have counted the attempt.
+    LogonUnconfirmed,
 }
 
 /// Error codes for structured error handling.
@@ -268,6 +365,10 @@ pub enum ErrorCode {
     /// Authentication failed.
     #[error("authentication failed")]
     AuthenticationFailed,
+
+    /// The server's certificate key does not match `server_cert_pin`.
+    #[error("certificate mismatch")]
+    CertificateMismatch,
 
     /// Connection timed out.
     #[error("timeout")]
@@ -336,6 +437,8 @@ mod tests {
             host: "192.168.1.100".to_string(),
             width: 1920,
             height: 1080,
+            phases: None,
+            credential_boundary: None,
         });
 
         let json = serde_json::to_string(&resp).unwrap();
@@ -350,6 +453,37 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"success\":false"));
         assert!(json.contains("\"code\":\"connection_failed\""));
+    }
+
+    #[test]
+    fn error_response_omits_reason() {
+        let json = serde_json::to_value(Response::error(ErrorCode::ConnectionFailed, "x")).unwrap();
+        assert!(json["error"].get("reason").is_none());
+    }
+
+    #[test]
+    fn authentication_failed_carries_reason() {
+        let resp = Response::authentication_failed(Some(AuthFailureReason::AccountLockedOut), "locked");
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["error"]["code"], "authentication_failed");
+        assert_eq!(json["error"]["reason"], "account_locked_out");
+
+        let back: Response = serde_json::from_value(json).unwrap();
+        assert_eq!(back.error.unwrap().reason, Some(AuthFailureReason::AccountLockedOut));
+    }
+
+    #[test]
+    fn logon_unconfirmed_wire_name() {
+        let resp = Response::authentication_failed(Some(AuthFailureReason::LogonUnconfirmed), "x");
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["error"]["reason"], "logon_unconfirmed");
+    }
+
+    #[test]
+    fn error_info_without_reason_still_parses() {
+        let info: ErrorInfo =
+            serde_json::from_str(r#"{"code":"authentication_failed","message":"m"}"#).unwrap();
+        assert_eq!(info.reason, None);
     }
 
     #[test]

@@ -13,6 +13,7 @@ use super::helpers::{
     get_creation_time, get_disk_space, get_file_attributes, get_last_access_time,
     get_last_write_time,
 };
+use super::path::resolve_in_drive;
 use super::MultiDriveBackend;
 
 /// State for directory iteration.
@@ -352,7 +353,7 @@ pub fn query_directory(
                 "query_directory: file_id={} -> parent_path={:?}",
                 file_id, _parent_path
             );
-            let mut find_file_path = None;
+            let mut found = None;
 
             // Get base path for this device
             let base_path = match backend.get_base_path(device_id) {
@@ -376,27 +377,16 @@ pub fn query_directory(
             if req_inner.initial_query > 0 {
                 if req_inner.path.ends_with('*') {
                     // Wildcard query - list directory contents
-                    let query_path = req_inner.path.replace('\\', "/");
-                    let len = query_path.len();
-                    // Strip the trailing * and any leading slashes
-                    let dir_path_str = query_path[..len - 1].trim_start_matches('/');
-                    let dir_path = if dir_path_str.is_empty() {
-                        base_path.clone()
-                    } else {
-                        base_path.join(dir_path_str)
+                    let dir_remote = &req_inner.path[..req_inner.path.len() - 1];
+                    let dir_path = match resolve_in_drive(&base_path, dir_remote) {
+                        Ok(path) => path,
+                        Err(status) => {
+                            return Ok(query_directory_refusal(req_inner.device_io_request, status))
+                        }
                     };
 
-                    if let Ok(read_dir) = fs::read_dir(&dir_path) {
-                        let mut iter = read_dir;
-                        // Find first non-. and non-.. entry
-                        while let Some(Ok(entry)) = iter.next() {
-                            let name = entry.file_name();
-                            let name_str = name.to_string_lossy();
-                            if name_str != "." && name_str != ".." {
-                                find_file_path = Some(entry.path());
-                                break;
-                            }
-                        }
+                    if let Ok(mut iter) = fs::read_dir(&dir_path) {
+                        found = next_listed_entry(&mut iter);
                         backend.file_dir_map.insert(
                             req_inner.device_io_request.file_id,
                             DirIterState {
@@ -407,18 +397,26 @@ pub fn query_directory(
                     }
                 } else {
                     // Specific file query
-                    let query_path = req_inner.path.replace('\\', "/");
-                    let query_path = query_path.trim_start_matches('/');
-                    let full_path = if query_path.is_empty() {
-                        base_path.clone()
-                    } else {
-                        base_path.join(query_path)
+                    let full_path = match resolve_in_drive(&base_path, &req_inner.path) {
+                        Ok(path) => path,
+                        Err(status) => {
+                            return Ok(query_directory_refusal(req_inner.device_io_request, status))
+                        }
                     };
-                    find_file_path = Some(full_path);
+                    // The resolver refused any symlink below the drive, so the only link followed here
+                    // is a symlinked drive folder (barring a local process swapping in a link after the
+                    // check).
+                    found = match fs::metadata(&full_path) {
+                        Ok(meta) => Some((full_path, meta)),
+                        Err(error) => {
+                            debug!(%error, "Get metadata error (file may have been deleted)");
+                            None
+                        }
+                    };
                 }
 
                 make_query_dir_resp(
-                    find_file_path,
+                    found,
                     req_inner.device_io_request,
                     req_inner.file_info_class_lvl,
                     true,
@@ -429,13 +427,11 @@ pub fn query_directory(
                     .file_dir_map
                     .get_mut(&req_inner.device_io_request.file_id)
                 {
-                    if let Some(Ok(entry)) = dir_state.iter.next() {
-                        find_file_path = Some(entry.path());
-                    }
+                    found = next_listed_entry(&mut dir_state.iter);
                 }
 
                 make_query_dir_resp(
-                    find_file_path,
+                    found,
                     req_inner.device_io_request,
                     req_inner.file_info_class_lvl,
                     false,
@@ -461,91 +457,131 @@ pub fn query_directory(
     }
 }
 
+fn query_directory_refusal(
+    device_io_request: DeviceIoRequest,
+    status: NtStatus,
+) -> Vec<SvcMessage> {
+    vec![SvcMessage::from(
+        RdpdrPdu::ClientDriveQueryDirectoryResponse(ClientDriveQueryDirectoryResponse {
+            device_io_reply: DeviceIoResponse::new(device_io_request, status),
+            buffer: None,
+        }),
+    )]
+}
+
+/// Next entry worth listing, with metadata from the entry itself.
+///
+/// `DirEntry::metadata` does not follow symlinks, so the check and the reported metadata come from
+/// one stat. Symlinks are skipped: the resolver refuses to open them, and following one would
+/// report its target's size and times. Entries that vanish between listing and stat are skipped.
+fn next_listed_entry(iter: &mut ReadDir) -> Option<(PathBuf, fs::Metadata)> {
+    iter.filter_map(Result::ok).find_map(|entry| {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            return None;
+        }
+        match entry.metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => None,
+            Ok(meta) => Some((entry.path(), meta)),
+            Err(error) => {
+                debug!(%error, "Get metadata error (file may have been deleted)");
+                None
+            }
+        }
+    })
+}
+
 fn make_query_dir_resp(
-    find_file_path: Option<PathBuf>,
+    found: Option<(PathBuf, fs::Metadata)>,
     device_io_request: DeviceIoRequest,
     file_class: FileInformationClassLevel,
     initial_query: bool,
 ) -> PduResult<Vec<SvcMessage>> {
-    let not_found_status = if initial_query {
-        NtStatus::NO_SUCH_FILE
-    } else {
-        NtStatus::NO_MORE_FILES
-    };
-
-    match find_file_path {
-        None => Ok(vec![SvcMessage::from(
-            RdpdrPdu::ClientDriveQueryDirectoryResponse(ClientDriveQueryDirectoryResponse {
-                device_io_reply: DeviceIoResponse::new(device_io_request, not_found_status),
-                buffer: None,
-            }),
-        )]),
-        Some(file_full_path) => {
-            let file_name = file_full_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-
-            match fs::metadata(&file_full_path) {
-                Ok(meta) => {
-                    let file_attribute = get_file_attributes(&meta, file_name);
-                    if file_class == FileInformationClassLevel::FILE_BOTH_DIRECTORY_INFORMATION {
-                        let info = FileBothDirectoryInformation::new(
-                            get_creation_time(&meta),
-                            get_last_write_time(&meta),
-                            get_last_access_time(&meta),
-                            get_last_write_time(&meta),
-                            i64::try_from(meta.len()).unwrap_or(0),
-                            file_attribute,
-                            file_name.to_owned(),
-                        );
-                        let info2 = FileInformationClass::BothDirectory(info);
-                        Ok(vec![SvcMessage::from(
-                            RdpdrPdu::ClientDriveQueryDirectoryResponse(
-                                ClientDriveQueryDirectoryResponse {
-                                    device_io_reply: DeviceIoResponse::new(
-                                        device_io_request,
-                                        NtStatus::SUCCESS,
-                                    ),
-                                    buffer: Some(info2),
-                                },
-                            ),
-                        )])
-                    } else {
-                        // Windows may request various file info classes; NOT_SUPPORTED is a valid response
-                        debug!(
-                            "unsupported file class for query directory: {:?}",
-                            file_class
-                        );
-                        Ok(vec![SvcMessage::from(
-                            RdpdrPdu::ClientDriveQueryDirectoryResponse(
-                                ClientDriveQueryDirectoryResponse {
-                                    device_io_reply: DeviceIoResponse::new(
-                                        device_io_request,
-                                        NtStatus::NOT_SUPPORTED,
-                                    ),
-                                    buffer: None,
-                                },
-                            ),
-                        )])
-                    }
-                }
-                Err(error) => {
-                    // File may have been deleted between listing and metadata fetch (normal for IPC)
-                    debug!(%error, "Get metadata error (file may have been deleted)");
-                    Ok(vec![SvcMessage::from(
-                        RdpdrPdu::ClientDriveQueryDirectoryResponse(
-                            ClientDriveQueryDirectoryResponse {
-                                device_io_reply: DeviceIoResponse::new(
-                                    device_io_request,
-                                    not_found_status,
-                                ),
-                                buffer: None,
-                            },
-                        ),
-                    )])
+    let (status, buffer) = match found {
+        None if initial_query => (NtStatus::NO_SUCH_FILE, None),
+        None => (NtStatus::NO_MORE_FILES, None),
+        Some((path, meta)) => {
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            match directory_entry(&file_class, &meta, file_name) {
+                Some(entry) => (NtStatus::SUCCESS, Some(entry)),
+                None => {
+                    debug!(
+                        "unsupported file class for query directory: {:?}",
+                        file_class
+                    );
+                    (NtStatus::NOT_SUPPORTED, None)
                 }
             }
         }
+    };
+    Ok(vec![SvcMessage::from(
+        RdpdrPdu::ClientDriveQueryDirectoryResponse(ClientDriveQueryDirectoryResponse {
+            device_io_reply: DeviceIoResponse::new(device_io_request, status),
+            buffer,
+        }),
+    )])
+}
+
+/// Build one directory entry in the requested class, or `None` for a class the server may not
+/// send for a drive (MS-RDPEFS 2.2.3.3.10 lists the four below).
+///
+/// Each response carries a single entry, so `NextEntryOffset` stays 0 (MS-FSCC 2.4: the last
+/// entry's offset is 0) and no inter-entry alignment padding is needed.
+pub(super) fn directory_entry(
+    file_class: &FileInformationClassLevel,
+    meta: &fs::Metadata,
+    file_name: &str,
+) -> Option<FileInformationClass> {
+    let creation_time = get_creation_time(meta);
+    let last_access_time = get_last_access_time(meta);
+    let last_write_time = get_last_write_time(meta);
+    // NTFS reports 0 for a directory's EndOfFile and AllocationSize; a Unix directory's st_size
+    // is a filesystem-specific nonzero value, which `dir` would add to the folder's byte total.
+    let size = if meta.is_dir() {
+        0
+    } else {
+        i64::try_from(meta.len()).unwrap_or(0)
+    };
+    let attributes = get_file_attributes(meta, file_name);
+    let name = file_name.to_owned();
+
+    match *file_class {
+        FileInformationClassLevel::FILE_DIRECTORY_INFORMATION => Some(
+            FileInformationClass::Directory(FileDirectoryInformation::new(
+                creation_time,
+                last_access_time,
+                last_write_time,
+                last_write_time,
+                size,
+                attributes,
+                name,
+            )),
+        ),
+        FileInformationClassLevel::FILE_FULL_DIRECTORY_INFORMATION => Some(
+            FileInformationClass::FullDirectory(FileFullDirectoryInformation::new(
+                creation_time,
+                last_access_time,
+                last_write_time,
+                last_write_time,
+                size,
+                attributes,
+                name,
+            )),
+        ),
+        FileInformationClassLevel::FILE_BOTH_DIRECTORY_INFORMATION => Some(
+            FileInformationClass::BothDirectory(FileBothDirectoryInformation::new(
+                creation_time,
+                last_access_time,
+                last_write_time,
+                last_write_time,
+                size,
+                attributes,
+                name,
+            )),
+        ),
+        FileInformationClassLevel::FILE_NAMES_INFORMATION => {
+            Some(FileInformationClass::Names(FileNamesInformation::new(name)))
+        }
+        _ => None,
     }
 }

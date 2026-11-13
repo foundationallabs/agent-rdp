@@ -36,6 +36,19 @@ alternate_shell?: string,
  */
 enable_credssp?: boolean, 
 /**
+ * Required server key: `sha256/<base64>` of the certificate's DER SubjectPublicKeyInfo.
+ * When set, the TLS handshake fails with `certificate_mismatch` unless the server holds
+ * that key. When unset, any server certificate is accepted.
+ */
+server_cert_pin?: string, 
+/**
+ * When the server skips NLA and has not confirmed the login 5 s after the connection came
+ * up, press Enter once to dismiss a Windows pre-logon notice (the "legal notice" policy)
+ * and keep waiting (default: false). The press goes to whatever screen has focus: on a host
+ * that discards the sent password and shows its sign-in prompt, it submits an empty password.
+ */
+acknowledge_logon_notice: boolean, 
+/**
  * Desktop width in pixels.
  */
 width: number, 

@@ -2,6 +2,8 @@
 import type { AccessibilitySnapshot } from "./AccessibilitySnapshot.js";
 import type { AutomationStatus } from "./AutomationStatus.js";
 import type { ClickResult } from "./ClickResult.js";
+import type { ConnectPhase } from "./ConnectPhase.js";
+import type { CredentialBoundary } from "./CredentialBoundary.js";
 import type { ElementValue } from "./ElementValue.js";
 import type { LocateResult } from "./LocateResult.js";
 import type { MappedDrive } from "./MappedDrive.js";
@@ -25,7 +27,15 @@ width: number,
 /**
  * Desktop height.
  */
-height: number, } | { "type": "screenshot", 
+height: number, 
+/**
+ * The phases of the connect.
+ */
+phases?: Array<ConnectPhase>, 
+/**
+ * Where the credentials left: `rdp_connect` with NLA on, `logon` with NLA off.
+ */
+credential_boundary?: CredentialBoundary, } | { "type": "screenshot", 
 /**
  * Image width.
  */

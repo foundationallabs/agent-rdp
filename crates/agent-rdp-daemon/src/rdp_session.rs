@@ -3,42 +3,61 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use parking_lot::RwLock;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
-use agent_rdp_protocol::DriveMapping;
-use ironrdp::connector::{self, ClientConnector, ConnectorResult, Credentials, ServerName};
+use agent_rdp_protocol::{
+    AuthFailureReason, ConnectPhaseName, CredentialBoundary, DriveMapping, ErrorCode,
+};
+use ironrdp::connector::{
+    self, ClientConnector, ClientConnectorState, ConnectionResult, ConnectorError, ConnectorResult,
+    Credentials, ServerName,
+};
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp::pdu::rdp::client_info::PerformanceFlags;
+use ironrdp::pdu::WriteBuf;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageOutput};
 use ironrdp_dvc::DrdynvcClient;
 use ironrdp_rdpdr::Rdpdr;
 
 use crate::automation::{AutomationDvc, SharedDvcState};
+use crate::logon::{self, LogonOutcome, LogonReport, LogonWatch};
 use crate::rdpdr::MultiDriveBackend;
+use crate::tls::{self, CertPin};
 use ironrdp_rdpsnd::client::{NoopRdpsndBackend, Rdpsnd};
 use ironrdp_tokio::{FramedWrite, TokioFramed};
 use tokio::net::TcpStream;
 
 pub mod clipboard;
+mod connect_phases;
+#[cfg(test)]
+mod mock_server;
+
+use connect_phases::{timed, PhaseStart, PhaseTimeouts, PHASE_TIMEOUTS};
+pub use connect_phases::ConnectTrace;
 
 #[derive(Error, Debug)]
 pub enum RdpError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
 
-    #[error("Authentication failed")]
-    AuthenticationFailed,
+    #[error("Authentication failed ({0:?})")]
+    AuthenticationFailed(AuthFailureReason),
 
     #[error("TLS error: {0}")]
     TlsError(String),
+
+    #[error("{0}")]
+    CertificateMismatch(String),
 
     #[error("Protocol error: {0}")]
     ProtocolError(String),
@@ -54,6 +73,309 @@ pub enum RdpError {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+}
+
+impl RdpError {
+    /// The response code for a failed connect. Only a refused or unconfirmed login is
+    /// `authentication_failed`; the session manager retries every other failure.
+    pub fn connect_error_code(&self) -> ErrorCode {
+        match self {
+            Self::AuthenticationFailed(_) => ErrorCode::AuthenticationFailed,
+            Self::CertificateMismatch(_) => ErrorCode::CertificateMismatch,
+            _ => ErrorCode::ConnectionFailed,
+        }
+    }
+}
+
+impl From<ConnectorError> for RdpError {
+    fn from(error: ConnectorError) -> Self {
+        match logon::connector_auth_failure(&error) {
+            Some(reason) => Self::AuthenticationFailed(reason),
+            None => Self::ConnectionFailed(error.to_string()),
+        }
+    }
+}
+
+/// A pin mismatch is its own error, so the caller does not retry it as a connection failure.
+fn tls_upgrade_error(error: std::io::Error) -> RdpError {
+    match tls::certificate_mismatch(&error) {
+        Some(mismatch) => RdpError::CertificateMismatch(mismatch.to_string()),
+        None => RdpError::TlsError(error.to_string()),
+    }
+}
+
+/// How long `connect()` waits for the server to report the login result before it fails closed,
+/// counted from when the credentials left: NLA off, in the Client Info PDU; NLA on, from the start
+/// of CredSSP. The phases before it have their own limits ([`PHASE_TIMEOUTS`]) on top, so a caller
+/// that wants the verdict passes a request timeout above the SDK's 30 s default.
+const LOGON_OUTCOME_WINDOW: Duration = Duration::from_secs(20);
+
+/// How long an NLA-off `connect()` that answers a pre-logon notice waits for the login before it
+/// presses Enter, counted from when the connection sequence finished. A login with no notice
+/// confirms within about 2 s of the credentials.
+const LOGON_NOTICE_DELAY: Duration = Duration::from_secs(5);
+
+/// How long `connect()` gives each phase before the credentials, how long it gives the phase after
+/// them (`logon` with NLA off, `rdp_connect` with NLA on) before it fails the login closed, and
+/// when it answers a pre-logon notice.
+#[derive(Clone, Copy, Debug)]
+struct ConnectTiming {
+    phases: PhaseTimeouts,
+    logon_window: Duration,
+    notice_delay: Duration,
+}
+
+const CONNECT_TIMING: ConnectTiming = ConnectTiming {
+    phases: PHASE_TIMEOUTS,
+    logon_window: LOGON_OUTCOME_WINDOW,
+    notice_delay: LOGON_NOTICE_DELAY,
+};
+
+/// Whether `connect()` must wait for the server to confirm the login. Without CredSSP the server
+/// checks the password only after the connection is up. Reads what the server selected: it can
+/// pick TLS-only even when the client offered NLA.
+fn awaits_logon(connector: &ClientConnector) -> bool {
+    !connector.should_perform_credssp()
+}
+
+/// `connect_finalize` for a server that selected TLS-only security. Records `rdp_connect` up to
+/// the Client Info PDU, which carries the credentials, then starts `logon` as it leaves: the
+/// server may check the credentials as soon as it arrives. Returns the start of `logon`, which the
+/// caller finishes once the server confirms the login.
+async fn finalize_without_nla(
+    mut connector: ClientConnector,
+    framed: &mut TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>,
+    trace: &mut ConnectTrace,
+    timing: &ConnectTiming,
+) -> Result<(ConnectionResult, PhaseStart), RdpError> {
+    let mut buf = WriteBuf::new();
+    let send = send_client_info(&mut connector, framed, &mut buf);
+    let sent = trace
+        .run(
+            ConnectPhaseName::RdpConnect,
+            Some(timing.phases.client_info),
+            send,
+        )
+        .await;
+    if let Err(error) = sent {
+        if let RdpError::AuthenticationFailed(_) = error {
+            // Only the unmarked-Client-Info guard fails the login here: the credentials may be out.
+            trace.credentials_leave_in(CredentialBoundary::RdpConnect);
+        }
+        return Err(error);
+    }
+
+    trace.credentials_leave_in(CredentialBoundary::Logon);
+    let logon_start = PhaseStart::now();
+    let window = timing.logon_window;
+    let finish = finish_after_client_info(connector, framed, &mut buf);
+    let (result, timed_out_after) = timed(
+        logon_start.deadline(window),
+        window,
+        || logon_unconfirmed_after(window),
+        finish,
+    )
+    .await;
+    match result {
+        Ok(connection) => Ok((connection, logon_start)),
+        Err(error) => {
+            let failed = Err(error);
+            trace.finish(
+                ConnectPhaseName::Logon,
+                logon_start,
+                &failed,
+                timed_out_after,
+            );
+            failed
+        }
+    }
+}
+
+/// `connect_finalize` for a server that selected NLA. CredSSP sends the credentials inside it, at
+/// a point it does not expose, so `rdp_connect` as a whole counts as past the boundary and a stall
+/// fails closed after `timing.logon_window`. Reading the server key comes first and sends nothing,
+/// so its failure does not.
+async fn finalize_with_nla(
+    upgraded: ironrdp_tokio::Upgraded,
+    connector: ClientConnector,
+    framed: &mut TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>,
+    server_cert: &[u8],
+    host: &str,
+    trace: &mut ConnectTrace,
+    timing: &ConnectTiming,
+) -> Result<ConnectionResult, RdpError> {
+    let server_public_key = RdpSession::extract_public_key(server_cert);
+    if server_public_key.is_ok() {
+        trace.credentials_leave_in(CredentialBoundary::RdpConnect);
+    }
+    let finalize = async {
+        let server_public_key = server_public_key?;
+
+        // Create network client for CredSSP
+        let mut network_client = NoopNetworkClient;
+
+        // Convert host to ServerName
+        let server_name: ServerName = host.to_string().into();
+
+        Ok(ironrdp_tokio::connect_finalize(
+            upgraded,
+            connector,
+            framed,
+            &mut network_client,
+            server_name,
+            server_public_key,
+            None, // No Kerberos
+        )
+        .await?)
+    };
+    let window = timing.logon_window;
+    let stalled = || logon_unconfirmed_after(window);
+    trace
+        .run_until(
+            ConnectPhaseName::RdpConnect,
+            Some((window, stalled)),
+            finalize,
+        )
+        .await
+}
+
+/// NLA off: steps the connection sequence through the Client Info PDU. Nothing before it carries
+/// the password, so a failure here is a connection failure the caller may retry.
+async fn send_client_info(
+    connector: &mut ClientConnector,
+    framed: &mut TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>,
+    buf: &mut WriteBuf,
+) -> Result<(), RdpError> {
+    loop {
+        if let ClientConnectorState::Connected { .. } = connector.state {
+            // Connected without passing the Client Info step means the connector sent the
+            // credentials somewhere this loop does not mark, so the server may have counted the
+            // attempt. Fail closed rather than as a retryable connection error.
+            error!("Connected without a marked Client Info step; failing the login closed");
+            return Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonUnconfirmed,
+            ));
+        }
+        let sends_client_info = matches!(
+            connector.state,
+            ClientConnectorState::SecureSettingsExchange { .. }
+        );
+        ironrdp_tokio::single_sequence_step(framed, connector, buf).await?;
+        if sends_client_info {
+            return Ok(());
+        }
+    }
+}
+
+/// NLA off: the rest of the connection sequence after the Client Info PDU. A failure here is not
+/// a connection failure the caller may retry: the server may have counted a login attempt.
+async fn finish_after_client_info(
+    mut connector: ClientConnector,
+    framed: &mut TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>,
+    buf: &mut WriteBuf,
+) -> Result<ConnectionResult, RdpError> {
+    loop {
+        if let ClientConnectorState::Connected { result } = connector.state {
+            return Ok(result);
+        }
+        ironrdp_tokio::single_sequence_step(framed, &mut connector, buf)
+            .await
+            .map_err(error_after_credentials)?;
+    }
+}
+
+/// Once the credentials are out, a failure is not a connection failure the caller may retry:
+/// the server may have counted a login attempt.
+fn error_after_credentials(error: ConnectorError) -> RdpError {
+    match RdpError::from(error) {
+        RdpError::ConnectionFailed(message) => {
+            warn!(%message, "Connect failed after the credentials were sent; ending the login unconfirmed");
+            RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed)
+        }
+        other => other,
+    }
+}
+
+/// The NLA-off login result: success only when the server confirmed the login. Silence and a
+/// session end both fail closed: on some hosts Windows sends nothing for a wrong password, and
+/// the server may have counted the attempt before the session ended.
+fn logon_verdict(report: Option<LogonReport>, window: Duration) -> Result<(), RdpError> {
+    match report {
+        Some(LogonReport::Outcome(LogonOutcome::Succeeded)) => {
+            info!("Server confirmed the login");
+            Ok(())
+        }
+        Some(LogonReport::Outcome(LogonOutcome::Failed(reason))) => {
+            Err(RdpError::AuthenticationFailed(reason))
+        }
+        Some(LogonReport::SessionEnded) => {
+            warn!("Session ended before the server confirmed the login");
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonUnconfirmed,
+            ))
+        }
+        None => Err(logon_unconfirmed_after(window)),
+    }
+}
+
+/// Waits until `deadline` for the NLA-off login result. With `notice_delay`, a login still
+/// unconfirmed that long from now gets one Enter press, the default button of a Windows pre-logon
+/// notice. Only one: on a sign-in screen, a second Enter could submit an empty password.
+async fn wait_for_logon(
+    mut logon_rx: tokio::sync::oneshot::Receiver<LogonReport>,
+    deadline: Instant,
+    notice_delay: Option<Duration>,
+    command_tx: &mpsc::Sender<SessionCommand>,
+) -> Option<LogonReport> {
+    let press_at = notice_delay
+        .map(|delay| Instant::now() + delay)
+        .filter(|at| *at < deadline);
+    if let Some(press_at) = press_at {
+        if let Some(report) = logon::logon_report_by(&mut logon_rx, press_at).await {
+            return Some(report);
+        }
+        info!("No login confirmation yet; pressing Enter once for a pre-logon notice");
+        // A closed session is left for the login wait below to report.
+        let _ = send_key_press(command_tx, "enter").await;
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    logon::await_logon_report(logon_rx, remaining).await
+}
+
+/// Send a key combination (e.g., "super+r", "ctrl+c") before or after the session exists.
+async fn send_key_press(
+    command_tx: &mpsc::Sender<SessionCommand>,
+    keys: &str,
+) -> Result<(), RdpError> {
+    let key_infos = parse_key_combination(keys).map_err(RdpError::InvalidInput)?;
+    let send = |event| async move {
+        command_tx
+            .send(SessionCommand::SendInput(vec![event]))
+            .await
+            .map_err(|_| RdpError::SessionClosed)
+    };
+
+    // Press all keys down
+    for info in &key_infos {
+        send(create_key_event(info.scancode, info.extended, false)).await?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Small delay before releasing
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Release all keys in reverse order
+    for info in key_infos.iter().rev() {
+        send(create_key_event(info.scancode, info.extended, true)).await?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    Ok(())
+}
+
+fn logon_unconfirmed_after(window: Duration) -> RdpError {
+    warn!("No login confirmation from the server within {window:?}; ending the session");
+    RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed)
 }
 
 /// Configuration for an RDP connection.
@@ -73,6 +395,12 @@ pub struct RdpConfig {
     pub drives: Vec<DriveMapping>,
     /// Shared DVC state for automation (enables DVC channel if provided).
     pub automation_dvc_state: Option<SharedDvcState>,
+    /// Required server key. Without one, any certificate is accepted.
+    pub server_cert_pin: Option<CertPin>,
+    /// When the server skips NLA: press Enter once when the login is still unconfirmed [`LOGON_NOTICE_DELAY`]
+    /// after the connection came up, to dismiss a Windows pre-logon notice (the "legal notice"
+    /// policy), which holds the login until someone presses OK.
+    pub acknowledge_logon_notice: bool,
 }
 
 use crate::automation::DvcCommandReceiver;
@@ -165,21 +493,53 @@ fn build_connector_config(config: &RdpConfig) -> connector::Config {
 }
 
 impl RdpSession {
-    /// Establish a new RDP connection.
+    /// Establish a new RDP connection, recording its phases in `trace` whether it succeeds or not.
     ///
     /// If `disconnect_notify` is provided, it will be signaled when the connection drops.
     pub async fn connect(
         config: RdpConfig,
         disconnect_notify: Option<DisconnectNotify>,
+        trace: &mut ConnectTrace,
     ) -> Result<Self, RdpError> {
+        Self::connect_within(config, disconnect_notify, CONNECT_TIMING, trace).await
+    }
+
+    /// [`Self::connect`] with the timing as a parameter.
+    async fn connect_within(
+        config: RdpConfig,
+        disconnect_notify: Option<DisconnectNotify>,
+        timing: ConnectTiming,
+        trace: &mut ConnectTrace,
+    ) -> Result<Self, RdpError> {
+        let logon_window = timing.logon_window;
+        let notice_delay = config
+            .acknowledge_logon_notice
+            .then_some(timing.notice_delay);
         info!("Connecting to {}:{}", config.host, config.port);
 
         let connector_config = build_connector_config(&config);
 
-        // Establish TCP connection
-        let addr = format!("{}:{}", config.host, config.port);
-        let tcp_stream = TcpStream::connect(&addr).await?;
-        let client_addr: SocketAddr = tcp_stream.local_addr()?;
+        let addrs = trace
+            .run(
+                ConnectPhaseName::Dns,
+                Some(timing.phases.dns),
+                connect_phases::resolve(&config.host, config.port),
+            )
+            .await?;
+        trace.detail().addresses = Some(addrs.iter().map(|a| a.ip().to_string()).collect());
+
+        let mut tried = None;
+        let tcp = trace
+            .run(ConnectPhaseName::Tcp, Some(timing.phases.tcp), async {
+                let stream = connect_phases::connect_tcp(&addrs, &mut tried).await?;
+                let client_addr: SocketAddr = stream.local_addr()?;
+                Ok((stream, client_addr))
+            })
+            .await;
+        let detail = trace.detail();
+        detail.address = tried.map(|addr| addr.ip().to_string());
+        detail.port = Some(config.port);
+        let (tcp_stream, client_addr) = tcp?;
         debug!("TCP connection established from {:?}", client_addr);
 
         // Create framed transport for initial connection
@@ -252,45 +612,63 @@ impl RdpSession {
         };
 
         // Begin connection (pre-TLS)
-        let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
-            .await
-            .map_err(|e| RdpError::ConnectionFailed(e.to_string()))?;
+        let should_upgrade = trace
+            .run(
+                ConnectPhaseName::RdpNegotiate,
+                Some(timing.phases.negotiate),
+                async { Ok(ironrdp_tokio::connect_begin(&mut framed, &mut connector).await?) },
+            )
+            .await?;
+        trace.detail().selected_protocol = Some(connect_phases::selected_protocol(&connector));
 
         // Perform TLS upgrade
         let initial_stream: TcpStream = framed.into_inner_no_leftover();
-        let (tls_stream, server_cert) = Self::tls_upgrade(initial_stream, &config.host)
-            .await
-            .map_err(|e| RdpError::TlsError(e.to_string()))?;
+        let pin = config.server_cert_pin.as_ref();
+        let upgrade = trace
+            .run(ConnectPhaseName::Tls, Some(timing.phases.tls), async {
+                tls::upgrade(initial_stream, &config.host, pin)
+                    .await
+                    .map_err(tls_upgrade_error)
+            })
+            .await;
+        match &upgrade {
+            Ok((_, server_cert)) => {
+                let detail = trace.detail();
+                detail.spki_pin = CertPin::of_certificate(server_cert).map(|key| key.to_string());
+                detail.cert_pin_matched = pin.map(|_| true);
+            }
+            Err(RdpError::CertificateMismatch(_)) => trace.detail().cert_pin_matched = Some(false),
+            Err(_) => {}
+        }
+        let (tls_stream, server_cert) = upgrade?;
         debug!("TLS connection established");
 
         // Mark upgrade as done
         let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
+        let await_logon = awaits_logon(&connector);
 
         // Create framed transport for upgraded connection
         let mut upgraded_framed: TokioFramed<tokio_rustls::client::TlsStream<TcpStream>> =
             TokioFramed::new(tls_stream);
 
-        // Extract server public key from certificate
-        let server_public_key = Self::extract_public_key(&server_cert)?;
-
-        // Create network client for CredSSP
-        let mut network_client = NoopNetworkClient;
-
-        // Convert host to ServerName
-        let server_name: ServerName = config.host.clone().into();
-
         // Finalize connection (post-TLS)
-        let connection_result = ironrdp_tokio::connect_finalize(
-            upgraded,
-            connector,
-            &mut upgraded_framed,
-            &mut network_client,
-            server_name,
-            server_public_key,
-            None, // No Kerberos
-        )
-        .await
-        .map_err(|e| RdpError::ConnectionFailed(e.to_string()))?;
+        let (connection_result, logon_start) = if await_logon {
+            let (result, logon_start) =
+                finalize_without_nla(connector, &mut upgraded_framed, trace, &timing).await?;
+            (result, Some(logon_start))
+        } else {
+            let result = finalize_with_nla(
+                upgraded,
+                connector,
+                &mut upgraded_framed,
+                &server_cert,
+                &config.host,
+                trace,
+                &timing,
+            )
+            .await?;
+            (result, None)
+        };
 
         info!("RDP connection established to {}", config.host);
 
@@ -300,6 +678,15 @@ impl RdpSession {
             connection_result.desktop_size.width,
             connection_result.desktop_size.height,
         );
+
+        let (logon_tx, logon_rx) = match logon_start {
+            Some(start) => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                (Some(tx), Some((rx, start)))
+            }
+            None => (None, None),
+        };
+        let logon_watch = LogonWatch::new(connection_result.io_channel_id, logon_tx);
 
         // Create active stage for ongoing communication
         let active_stage = ActiveStage::new(connection_result);
@@ -328,66 +715,30 @@ impl RdpSession {
                 disconnect_notify,
                 clipboard_backend_rx,
                 dvc_command_rx,
+                logon_watch,
             )
             .await;
         });
+
+        if let Some((logon_rx, start)) = logon_rx {
+            let deadline = start.deadline(logon_window);
+            let report = wait_for_logon(logon_rx, deadline, notice_delay, &command_tx).await;
+            let timed_out_after = report.is_none().then_some(logon_window);
+            let verdict = logon_verdict(report, logon_window);
+            trace.finish(ConnectPhaseName::Logon, start, &verdict, timed_out_after);
+            if let Err(error) = verdict {
+                // Leave no session sitting at the Windows logon screen. A graceful shutdown does
+                // not report a drop to the daemon, and is a no-op when the session already ended.
+                let _ = command_tx.send(SessionCommand::Shutdown).await;
+                return Err(error);
+            }
+        }
 
         Ok(Self {
             shared,
             command_tx,
             _task_handle: task_handle,
         })
-    }
-
-    /// Perform TLS upgrade on the stream.
-    async fn tls_upgrade(
-        stream: TcpStream,
-        server_name: &str,
-    ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Vec<u8>), std::io::Error> {
-        use tokio_rustls::TlsConnector;
-
-        let tls_config = Self::create_tls_config();
-        let connector = TlsConnector::from(Arc::new(tls_config));
-
-        // Try to parse as IP address first, then as DNS name
-        let server_name = if let Ok(ip) = server_name.parse::<std::net::IpAddr>() {
-            rustls::pki_types::ServerName::IpAddress(ip.into())
-        } else {
-            rustls::pki_types::ServerName::try_from(server_name.to_string())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
-        };
-
-        let tls_stream = connector.connect(server_name, stream).await?;
-
-        // Get peer certificate
-        let (_, server_conn) = tls_stream.get_ref();
-        let certs = server_conn
-            .peer_certificates()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "No peer certificate"))?;
-
-        let cert_der = certs
-            .first()
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "Empty certificate chain")
-            })?
-            .to_vec();
-
-        Ok((tls_stream, cert_der))
-    }
-
-    /// Create TLS configuration that accepts self-signed certificates.
-    fn create_tls_config() -> rustls::ClientConfig {
-        // Install ring as the default crypto provider
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-        // RDP servers often use self-signed certificates
-        rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerifier))
-            .with_no_client_auth()
     }
 
     /// Extract public key from DER-encoded certificate.
@@ -446,29 +797,7 @@ impl RdpSession {
 
     /// Send a key combination (e.g., "super+r", "ctrl+c").
     pub async fn send_key_press(&self, keys: &str) -> Result<(), RdpError> {
-        use std::time::Duration;
-
-        let key_infos = parse_key_combination(keys)
-            .map_err(|e| RdpError::InvalidInput(e))?;
-
-        // Press all keys down
-        for info in &key_infos {
-            let event = create_key_event(info.scancode, info.extended, false);
-            self.send_input(vec![event]).await?;
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        // Small delay before releasing
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Release all keys in reverse order
-        for info in key_infos.iter().rev() {
-            let event = create_key_event(info.scancode, info.extended, true);
-            self.send_input(vec![event]).await?;
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        Ok(())
+        send_key_press(&self.command_tx, keys).await
     }
 
     /// Send text input as Unicode characters.
@@ -542,9 +871,11 @@ async fn run_frame_processor(
     disconnect_notify: Option<DisconnectNotify>,
     mut clipboard_backend_rx: mpsc::UnboundedReceiver<clipboard::BackendMessage>,
     mut dvc_command_rx: Option<DvcCommandReceiver>,
+    mut logon_watch: LogonWatch,
 ) {
     info!("Frame processor started");
     let mut graceful_shutdown = false;
+    let mut end = LogonReport::SessionEnded;
 
     loop {
         tokio::select! {
@@ -717,12 +1048,14 @@ async fn run_frame_processor(
                                 error!("Failed to send response frame: {}", e);
                             }
                         }
+                        if let Some(reason) = logon_watch.observe(action, &payload) {
+                            // Leave no session sitting at the Windows logon screen.
+                            warn!(?reason, "Server rejected the login, ending the session");
+                            end = LogonReport::Outcome(LogonOutcome::Failed(reason));
+                            break;
+                        }
                         if should_terminate {
-                            // Server-initiated termination - notify daemon
-                            if let Some(notify) = disconnect_notify {
-                                let _ = notify.send(()).await;
-                            }
-                            return;
+                            break;
                         }
                     }
                     Err(e) => {
@@ -804,63 +1137,15 @@ async fn run_frame_processor(
 
     info!("Frame processor stopped (graceful={})", graceful_shutdown);
 
-    // Notify daemon of connection drop (unless this was a graceful shutdown)
-    if !graceful_shutdown {
+    // An unconfirmed login is connect()'s to answer: it reports the end itself or is already
+    // failing the login. Otherwise notify the daemon of the connection drop (unless this was a
+    // graceful shutdown).
+    let connect_reports = logon_watch.finish(end);
+    if !graceful_shutdown && !connect_reports {
         if let Some(notify) = disconnect_notify {
             info!("Notifying daemon of connection drop");
             let _ = notify.send(()).await;
         }
-    }
-}
-
-/// Custom certificate verifier that accepts all certificates.
-/// This is necessary because RDP servers typically use self-signed certificates.
-#[derive(Debug)]
-struct NoVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
-            rustls::SignatureScheme::ED25519,
-        ]
     }
 }
 
@@ -983,9 +1268,45 @@ fn create_key_event(scancode: u8, extended: bool, release: bool) -> FastPathInpu
 
 #[cfg(test)]
 mod tests {
+    use ironrdp::connector::sspi::{self, credssp::NStatusCode};
+    use ironrdp::connector::{ConnectorErrorKind, Sequence};
+    use ironrdp::pdu::nego::{ConnectionConfirm, ResponseFlags, SecurityProtocol};
+    use ironrdp::pdu::x224::X224;
+    use ironrdp::pdu::WriteBuf;
+
     use super::*;
 
-    fn test_config(alternate_shell: Option<&str>) -> RdpConfig {
+    #[test]
+    fn refused_login_connector_error_is_authentication_failed() {
+        let refused = ConnectorError::new(
+            "CredSSP",
+            ConnectorErrorKind::Credssp(sspi::Error::new_with_nstatus(
+                sspi::ErrorKind::InvalidToken,
+                "CredSSP server returned an error status",
+                NStatusCode::WRONG_PASSWORD,
+            )),
+        );
+        assert!(matches!(
+            RdpError::from(refused),
+            RdpError::AuthenticationFailed(AuthFailureReason::WrongPassword)
+        ));
+        let other = ConnectorError::new("connect", ConnectorErrorKind::General);
+        assert!(matches!(RdpError::from(other), RdpError::ConnectionFailed(_)));
+    }
+
+    #[test]
+    fn pin_mismatch_is_not_a_tls_error() {
+        let mismatch = rustls::Error::InvalidCertificate(rustls::CertificateError::Other(
+            rustls::OtherError(Arc::new(tls::CertificateMismatch { presented: None })),
+        ));
+        let error = std::io::Error::new(std::io::ErrorKind::InvalidData, mismatch);
+        assert!(matches!(tls_upgrade_error(error), RdpError::CertificateMismatch(_)));
+
+        let reset = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        assert!(matches!(tls_upgrade_error(reset), RdpError::TlsError(_)));
+    }
+
+    pub(super) fn test_config(alternate_shell: Option<&str>) -> RdpConfig {
         RdpConfig {
             host: "host".to_string(),
             port: 3389,
@@ -998,6 +1319,8 @@ mod tests {
             height: 800,
             drives: Vec::new(),
             automation_dvc_state: None,
+            server_cert_pin: None,
+            acknowledge_logon_notice: false,
         }
     }
 
@@ -1019,6 +1342,100 @@ mod tests {
         let connector = build_connector_config(&config);
         assert!(!connector.enable_credssp);
         assert!(connector.enable_tls);
+    }
+
+    fn verdict(report: Option<LogonReport>) -> Result<(), RdpError> {
+        logon_verdict(report, LOGON_OUTCOME_WINDOW)
+    }
+
+    #[test]
+    fn only_a_confirmed_login_succeeds() {
+        assert!(verdict(Some(LogonReport::Outcome(LogonOutcome::Succeeded))).is_ok());
+        assert!(matches!(
+            verdict(Some(LogonReport::Outcome(LogonOutcome::Failed(
+                AuthFailureReason::LogonFailedBadPassword
+            )))),
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonFailedBadPassword
+            ))
+        ));
+        assert!(matches!(
+            verdict(Some(LogonReport::SessionEnded)),
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonUnconfirmed
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_connection_error_after_the_credentials_is_an_unconfirmed_login() {
+        let closed = || ConnectorError::new("read frame", ConnectorErrorKind::General);
+        assert!(matches!(
+            RdpError::from(closed()),
+            RdpError::ConnectionFailed(_)
+        ));
+        assert!(matches!(
+            error_after_credentials(closed()),
+            RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed)
+        ));
+        let refused = ConnectorError::new(
+            "CredSSP",
+            ConnectorErrorKind::Credssp(sspi::Error::new_with_nstatus(
+                sspi::ErrorKind::InvalidToken,
+                "CredSSP server returned an error status",
+                NStatusCode::WRONG_PASSWORD,
+            )),
+        );
+        assert!(matches!(
+            error_after_credentials(refused),
+            RdpError::AuthenticationFailed(AuthFailureReason::WrongPassword)
+        ));
+    }
+
+    #[test]
+    fn a_silent_server_fails_the_login_closed() {
+        assert!(matches!(
+            verdict(None),
+            Err(RdpError::AuthenticationFailed(
+                AuthFailureReason::LogonUnconfirmed
+            ))
+        ));
+    }
+
+    /// Drive a connector through negotiation to the point where `connect()` decides whether to
+    /// wait for the login, with the server selecting `selected`.
+    fn negotiated_connector(enable_credssp: bool, selected: SecurityProtocol) -> ClientConnector {
+        let mut config = test_config(None);
+        config.enable_credssp = enable_credssp;
+        let mut connector = ClientConnector::new(
+            build_connector_config(&config),
+            "127.0.0.1:50000".parse().unwrap(),
+        );
+        let mut output = WriteBuf::new();
+        connector.step(&[], &mut output).unwrap();
+        let confirm = ironrdp::pdu::encode_vec(&X224(ConnectionConfirm::Response {
+            flags: ResponseFlags::empty(),
+            protocol: selected,
+        }))
+        .unwrap();
+        connector.step(&confirm, &mut output).unwrap();
+        connector.mark_security_upgrade_as_done();
+        connector
+    }
+
+    #[test]
+    fn nla_on_does_not_wait_for_the_login() {
+        let connector = negotiated_connector(true, SecurityProtocol::HYBRID);
+        assert!(!awaits_logon(&connector));
+    }
+
+    #[test]
+    fn tls_only_waits_for_the_login() {
+        let tls_offered = negotiated_connector(false, SecurityProtocol::SSL);
+        assert!(awaits_logon(&tls_offered));
+        // The server can pick TLS-only even when the client offered NLA.
+        let nla_offered = negotiated_connector(true, SecurityProtocol::SSL);
+        assert!(awaits_logon(&nla_offered));
     }
 
     #[test]
