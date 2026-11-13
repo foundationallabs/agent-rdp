@@ -51,7 +51,7 @@ ring = "0.17"
 webpki-roots = "0.26"
 
 # Image processing
-image = { version = "0.25", features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
 
 # Logging
