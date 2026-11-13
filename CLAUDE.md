@@ -109,8 +109,10 @@ Input sent as `FastPathInputEvent` (mouse via `MousePdu`, keyboard via scancode 
 
 ## Release Process
 
-This fork publishes `@foundationallabs/agent-rdp` and the platform packages `@foundationallabs/agent-rdp-{linux-x64,linux-arm64,darwin-arm64}` to npm. Upstream's release-please flow is removed.
+This is Pace's hard fork of [thisnick/agent-rdp](https://github.com/thisnick/agent-rdp); it does not track upstream. It publishes `@foundationallabs/agent-rdp` and the platform packages `@foundationallabs/agent-rdp-{linux-x64,linux-arm64,darwin-arm64}` to npm.
 
-1. Set the same version in `Cargo.toml` and the `package.json` of `packages/agent-rdp`, `packages/linux-x64`, `packages/linux-arm64` and `packages/darwin-arm64`
-2. Push a tag `pace-v<version>` (or run the **Pace Release** workflow manually)
-3. The workflow builds the three binaries, then publishes the platform packages and finally the main package with `npm publish --provenance` (needs the `NPM_TOKEN` secret)
+`main` is the only release line. Every change, including a version bump, lands on `main` through a PR, and CI runs on every PR.
+
+1. In a PR to `main`, set the same version in `Cargo.toml` and the `package.json` of `packages/agent-rdp`, `packages/linux-x64`, `packages/linux-arm64` and `packages/darwin-arm64`
+2. After it merges, tag the merge commit `pace-v<version>` and push the tag
+3. The **Pace Release** workflow runs the tests, builds the three binaries, checks that the versions match the tag and that the tagged commit is on `main`, then publishes the platform packages and finally the main package. It publishes through npm trusted publishing (OIDC, with provenance) in the `npm-publish` environment, so it needs no npm token. A manual run from a branch builds but does not publish.
