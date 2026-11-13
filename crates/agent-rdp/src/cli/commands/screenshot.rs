@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use agent_rdp_protocol::{ImageFormat, Request, ResponseData, ScreenshotRequest};
+use agent_rdp_protocol::{ErrorCode, ImageFormat, Request, ResponseData, ScreenshotRequest};
 use base64::Engine;
 
 use crate::cli::ScreenshotArgs;
@@ -29,7 +29,7 @@ pub async fn run(
         "png" => ImageFormat::Png,
         "jpeg" | "jpg" => ImageFormat::Jpeg,
         _ => {
-            output.print_error("invalid_format", "Format must be 'png' or 'jpeg'");
+            output.print_error(ErrorCode::InvalidRequest, "Format must be 'png' or 'jpeg'");
             std::process::exit(1);
         }
     };
@@ -43,7 +43,13 @@ pub async fn run(
     }
 
     // Handle the screenshot data - save to file
-    if let Some(ResponseData::Screenshot { width, height, base64, .. }) = response.data {
+    if let Some(ResponseData::Screenshot {
+        width,
+        height,
+        base64,
+        ..
+    }) = response.data
+    {
         let image_data = base64::engine::general_purpose::STANDARD.decode(&base64)?;
 
         let path = Path::new(&args.output);
@@ -58,7 +64,12 @@ pub async fn run(
                 height
             );
         } else {
-            println!("Screenshot saved to {} ({}x{})", path.display(), width, height);
+            println!(
+                "Screenshot saved to {} ({}x{})",
+                path.display(),
+                width,
+                height
+            );
         }
     }
 

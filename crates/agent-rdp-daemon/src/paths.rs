@@ -8,6 +8,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use agent_rdp_protocol::ErrorCode;
 use thiserror::Error;
 
 /// Environment variable that overrides the base directory for all sessions.
@@ -86,6 +87,18 @@ pub enum PathsError {
 }
 
 impl PathsError {
+    /// The protocol error code that reports this error: `internal_error` for I/O failures,
+    /// `invalid_request` for everything else (the caller's input or state directory is unusable).
+    pub fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::Io { .. } => ErrorCode::InternalError,
+            Self::RelativeStateDir { .. }
+            | Self::InvalidSessionName { .. }
+            | Self::SocketPathTooLong { .. }
+            | Self::UnsafeDir { .. } => ErrorCode::InvalidRequest,
+        }
+    }
+
     fn io(path: &Path) -> impl FnOnce(std::io::Error) -> PathsError + '_ {
         move |source| PathsError::Io {
             path: path.to_path_buf(),
@@ -300,7 +313,10 @@ fn create_dir_0700(path: &Path) -> Result<(), PathsError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(PathsError::io(parent))?;
     }
-    match std::fs::DirBuilder::new().mode(PRIVATE_DIR_MODE).create(path) {
+    match std::fs::DirBuilder::new()
+        .mode(PRIVATE_DIR_MODE)
+        .create(path)
+    {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(PathsError::io(path)(e)),
@@ -428,13 +444,19 @@ mod tests {
     #[test]
     fn resolve_base_dir_unset_and_empty_use_default() {
         assert_eq!(resolve_base_dir(None).unwrap(), default_base_dir());
-        assert_eq!(resolve_base_dir(Some(OsString::new())).unwrap(), default_base_dir());
+        assert_eq!(
+            resolve_base_dir(Some(OsString::new())).unwrap(),
+            default_base_dir()
+        );
     }
 
     #[test]
     fn resolve_base_dir_uses_absolute_value() {
         let abs = std::env::temp_dir().join("rdp-state");
-        assert_eq!(resolve_base_dir(Some(abs.clone().into_os_string())).unwrap(), abs);
+        assert_eq!(
+            resolve_base_dir(Some(abs.clone().into_os_string())).unwrap(),
+            abs
+        );
     }
 
     #[test]
@@ -470,7 +492,10 @@ mod tests {
     fn session_name_rejects_invalid_names() {
         for bad in ["", ".", "..", "a/b", "../x", "a b", "a\\b"] {
             assert!(
-                matches!(validate_session_name(bad), Err(PathsError::InvalidSessionName { .. })),
+                matches!(
+                    validate_session_name(bad),
+                    Err(PathsError::InvalidSessionName { .. })
+                ),
                 "{bad:?} should be rejected"
             );
         }
@@ -553,7 +578,10 @@ mod tests {
             let base = tmp.path().join("open");
             std::fs::create_dir(&base).unwrap();
             chmod(&base, 0o757);
-            assert!(matches!(ensure_base_dir(&base), Err(PathsError::UnsafeDir { .. })));
+            assert!(matches!(
+                ensure_base_dir(&base),
+                Err(PathsError::UnsafeDir { .. })
+            ));
             assert_eq!(mode(&base), 0o757, "must not be chmodded");
         }
 
@@ -564,7 +592,10 @@ mod tests {
             std::fs::create_dir(&target).unwrap();
             let link = tmp.path().join("link");
             symlink(&target, &link).unwrap();
-            for value in [link.clone().into_os_string(), format!("{}/", link.display()).into()] {
+            for value in [
+                link.clone().into_os_string(),
+                format!("{}/", link.display()).into(),
+            ] {
                 let base = resolve_base_dir(Some(value)).unwrap();
                 assert!(
                     matches!(ensure_base_dir(&base), Err(PathsError::UnsafeDir { .. })),
@@ -605,7 +636,10 @@ mod tests {
             ensure_private_dir(&real).unwrap();
             let link = base.join("default");
             symlink(&real, &link).unwrap();
-            assert!(matches!(verify_dirs_at(&base, &link), Err(PathsError::UnsafeDir { .. })));
+            assert!(matches!(
+                verify_dirs_at(&base, &link),
+                Err(PathsError::UnsafeDir { .. })
+            ));
         }
 
         #[test]
@@ -614,7 +648,10 @@ mod tests {
             let base = base_in(&tmp);
             let dir = session_under(&base);
             chmod(&dir, 0o770);
-            assert!(matches!(verify_dirs_at(&base, &dir), Err(PathsError::UnsafeDir { .. })));
+            assert!(matches!(
+                verify_dirs_at(&base, &dir),
+                Err(PathsError::UnsafeDir { .. })
+            ));
         }
 
         #[test]
@@ -623,7 +660,10 @@ mod tests {
             let base = base_in(&tmp);
             let dir = session_under(&base);
             chmod(&base, 0o770);
-            assert!(matches!(verify_dirs_at(&base, &dir), Err(PathsError::UnsafeDir { .. })));
+            assert!(matches!(
+                verify_dirs_at(&base, &dir),
+                Err(PathsError::UnsafeDir { .. })
+            ));
         }
 
         #[test]
@@ -632,7 +672,10 @@ mod tests {
             let base = tmp.path().join("base");
             std::fs::create_dir(&base).unwrap();
             chmod(&base, 0o775);
-            assert!(matches!(verify_base_at(&base), Err(PathsError::UnsafeDir { .. })));
+            assert!(matches!(
+                verify_base_at(&base),
+                Err(PathsError::UnsafeDir { .. })
+            ));
             chmod(&base, 0o700);
             verify_base_at(&base).unwrap();
         }

@@ -8,10 +8,11 @@ use agent_rdp_daemon::{
     cleanup_session, get_pid_path, get_session_dir, get_socket_path, verify_base_dir,
     verify_session_dirs, PathsError,
 };
-use agent_rdp_protocol::Request;
+use agent_rdp_protocol::{ErrorCode, Request};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
+use crate::error::CliError;
 use crate::ipc_client::IpcClient;
 
 /// Why no daemon can be used for a session right now.
@@ -24,10 +25,10 @@ enum DaemonUnavailable {
 }
 
 impl DaemonUnavailable {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> ErrorCode {
         match self {
-            Self::UnsafeDir(_) => "invalid_request",
-            Self::NotRunning => "daemon_not_running",
+            Self::UnsafeDir(e) => e.error_code(),
+            Self::NotRunning => ErrorCode::DaemonNotRunning,
         }
     }
 
@@ -73,9 +74,7 @@ impl SessionManager {
     /// directory must still pass [`verify_base_dir`], because a daemon would refuse it and
     /// the user would only see a startup timeout.
     fn verify_dirs(&self) -> Result<(), PathsError> {
-        let missing = |path: PathBuf| {
-            matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
-        };
+        let missing = |path: PathBuf| matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
         if !missing(self.session_dir()) {
             verify_session_dirs(&self.session)
         } else if !missing(agent_rdp_daemon::get_base_dir()) {
@@ -96,8 +95,8 @@ impl SessionManager {
     }
 
     /// Command pre-check: `true` when a daemon is running; otherwise prints the reason
-    /// (`invalid_request` for an unsafe state directory, else `daemon_not_running`) and
-    /// returns `false`, and the caller should exit with a failure status.
+    /// (the state-directory error's code when the directories fail verification, else
+    /// `daemon_not_running`) and returns `false`, and the caller should exit with a failure status.
     pub fn require_running_daemon(&self, output: &crate::output::Output) -> bool {
         match self.check_running() {
             Ok(()) => true,
@@ -161,7 +160,9 @@ impl SessionManager {
     fn process_exists(pid: u32) -> bool {
         use std::ptr;
         use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
 
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
@@ -217,12 +218,10 @@ impl SessionManager {
         // Create a temporary mutable client for the ping
         let socket_path = self.socket_path();
         match IpcClient::connect(&socket_path).await {
-            Ok(mut ping_client) => {
-                match ping_client.send(&Request::Ping, 5000).await {
-                    Ok(response) => response.success,
-                    Err(_) => false,
-                }
-            }
+            Ok(mut ping_client) => match ping_client.send(&Request::Ping, 5000).await {
+                Ok(response) => response.success,
+                Err(_) => false,
+            },
             Err(_) => false,
         }
     }
@@ -310,15 +309,23 @@ impl SessionManager {
             sleep(retry_delay).await;
         }
 
-        anyhow::bail!("Daemon failed to start within timeout")
+        Err(CliError::new(
+            ErrorCode::DaemonNotRunning,
+            "Daemon failed to start within timeout",
+        )
+        .into())
     }
 
     /// Connect to an existing daemon.
     async fn connect_to_daemon(&self) -> anyhow::Result<IpcClient> {
         let socket_path = self.socket_path();
-        IpcClient::connect(&socket_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to daemon: {}", e))
+        IpcClient::connect(&socket_path).await.map_err(|e| {
+            CliError::new(
+                ErrorCode::IpcError,
+                format!("Failed to connect to daemon: {e}"),
+            )
+            .into()
+        })
     }
 
     /// List all active sessions.
@@ -379,11 +386,14 @@ mod tests {
 
         base.chmod(0o775);
         let reason = manager.check_running().unwrap_err();
-        assert_eq!(reason.code(), "invalid_request");
+        assert_eq!(reason.code(), ErrorCode::InvalidRequest);
         assert!(reason.message().contains("sticky"), "{}", reason.message());
         assert!(!manager.is_daemon_alive());
 
         base.chmod(0o700);
-        assert_eq!(manager.check_running().unwrap_err().code(), "daemon_not_running");
+        assert_eq!(
+            manager.check_running().unwrap_err().code(),
+            ErrorCode::DaemonNotRunning
+        );
     }
 }

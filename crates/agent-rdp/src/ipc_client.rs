@@ -4,9 +4,11 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use agent_rdp_protocol::{Request, Response};
+use agent_rdp_protocol::{ErrorCode, Request, Response};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
+
+use crate::error::CliError;
 
 /// Default connect timeout in seconds.
 const CONNECT_TIMEOUT_SECS: u64 = 15;
@@ -29,7 +31,10 @@ impl IpcClient {
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("Connection to daemon timed out after {}s", CONNECT_TIMEOUT_SECS),
+                    format!(
+                        "Connection to daemon timed out after {}s",
+                        CONNECT_TIMEOUT_SECS
+                    ),
                 )
             })??;
         Ok(Self { stream })
@@ -51,7 +56,10 @@ impl IpcClient {
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("Connection to daemon timed out after {}s", CONNECT_TIMEOUT_SECS),
+                    format!(
+                        "Connection to daemon timed out after {}s",
+                        CONNECT_TIMEOUT_SECS
+                    ),
                 )
             })??;
         Ok(Self { stream })
@@ -62,16 +70,16 @@ impl IpcClient {
         let json = serde_json::to_string(request)? + "\n";
 
         // Write request and flush to ensure it's sent immediately
-        self.stream.write_all(json.as_bytes()).await?;
-        self.stream.flush().await?;
+        self.stream
+            .write_all(json.as_bytes())
+            .await
+            .map_err(ipc_error)?;
+        self.stream.flush().await.map_err(ipc_error)?;
 
         // Read response with timeout
-        let response = timeout(
-            Duration::from_millis(timeout_ms),
-            self.read_response(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("Request timed out"))??;
+        let response = timeout(Duration::from_millis(timeout_ms), self.read_response())
+            .await
+            .map_err(|_| CliError::new(ErrorCode::Timeout, "Request timed out"))??;
 
         Ok(response)
     }
@@ -80,11 +88,30 @@ impl IpcClient {
     async fn read_response(&mut self) -> anyhow::Result<Response> {
         let mut reader = BufReader::new(&mut self.stream);
         let mut line = String::new();
-        reader.read_line(&mut line).await?;
+        if reader.read_line(&mut line).await.map_err(ipc_error)? == 0 {
+            return Err(CliError::new(
+                ErrorCode::IpcError,
+                "Daemon closed the connection without a response",
+            )
+            .into());
+        }
 
-        let response: Response = serde_json::from_str(line.trim())?;
+        let response: Response = serde_json::from_str(line.trim()).map_err(|e| {
+            CliError::new(
+                ErrorCode::IpcError,
+                format!("Invalid response from daemon: {e}"),
+            )
+        })?;
         Ok(response)
     }
+}
+
+/// An I/O failure talking to the daemon.
+fn ipc_error(e: io::Error) -> CliError {
+    CliError::new(
+        ErrorCode::IpcError,
+        format!("Daemon connection failed: {e}"),
+    )
 }
 
 /// Try to connect to an existing daemon, with optional retries.
@@ -102,4 +129,64 @@ pub async fn try_connect(socket_path: &Path, retries: u32, delay_ms: u64) -> io:
     }
 
     Err(last_error)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::error::error_code;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::UnixStream;
+
+    /// A client wired to an in-memory peer that stands in for the daemon.
+    fn client_and_peer() -> (IpcClient, UnixStream) {
+        let (client, peer) = UnixStream::pair().unwrap();
+        (IpcClient { stream: client }, peer)
+    }
+
+    /// Read the request line the client sent, so the peer can then misbehave.
+    async fn read_request(peer: &mut UnixStream) {
+        let mut buf = [0u8; 256];
+        let _ = peer.read(&mut buf).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn silent_daemon_is_a_timeout() {
+        let (mut client, _peer) = client_and_peer();
+        let err = client.send(&Request::Ping, 20).await.unwrap_err();
+        assert_eq!(error_code(&err), ErrorCode::Timeout);
+    }
+
+    #[tokio::test]
+    async fn daemon_closing_the_connection_is_an_ipc_error() {
+        let (mut client, mut peer) = client_and_peer();
+        let daemon = tokio::spawn(async move {
+            read_request(&mut peer).await;
+            drop(peer);
+        });
+        let err = client.send(&Request::Ping, 5000).await.unwrap_err();
+        daemon.await.unwrap();
+        assert_eq!(error_code(&err), ErrorCode::IpcError);
+    }
+
+    #[tokio::test]
+    async fn unparseable_response_is_an_ipc_error() {
+        let (mut client, mut peer) = client_and_peer();
+        let daemon = tokio::spawn(async move {
+            read_request(&mut peer).await;
+            peer.write_all(b"not json\n").await.unwrap();
+            peer
+        });
+        let err = client.send(&Request::Ping, 5000).await.unwrap_err();
+        drop(daemon.await.unwrap());
+        assert_eq!(error_code(&err), ErrorCode::IpcError);
+    }
+
+    #[tokio::test]
+    async fn closed_daemon_on_write_is_an_ipc_error() {
+        let (mut client, peer) = client_and_peer();
+        drop(peer);
+        let err = client.send(&Request::Ping, 5000).await.unwrap_err();
+        assert_eq!(error_code(&err), ErrorCode::IpcError);
+    }
 }

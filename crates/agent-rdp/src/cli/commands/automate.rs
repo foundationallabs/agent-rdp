@@ -1,7 +1,7 @@
 //! Automate command implementation for Windows UI Automation.
 
 use agent_rdp_protocol::{
-    AutomateRequest, AutomationScrollDirection, Request, WaitState, WindowAction,
+    AutomateRequest, AutomationScrollDirection, ErrorCode, Request, WaitState, WindowAction,
 };
 
 use crate::cli::{AutomateAction, AutomateArgs};
@@ -41,7 +41,13 @@ pub async fn run(
 
         AutomateAction::Focus { selector } => AutomateRequest::Focus { selector },
 
-        AutomateAction::Click { selector, double_click } => AutomateRequest::Click { selector, double_click },
+        AutomateAction::Click {
+            selector,
+            double_click,
+        } => AutomateRequest::Click {
+            selector,
+            double_click,
+        },
 
         AutomateAction::Select { selector, item } => AutomateRequest::Select { selector, item },
 
@@ -91,7 +97,7 @@ pub async fn run(
                 "close" => WindowAction::Close,
                 _ => {
                     output.print_error(
-                        "invalid_request",
+                        ErrorCode::InvalidRequest,
                         &format!("Unknown window action: {}", action),
                     );
                     std::process::exit(1);
