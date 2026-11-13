@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every PR runs CI, whatever its base, so a stacked PR is not merged untested.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read

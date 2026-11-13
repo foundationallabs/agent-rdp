@@ -32,13 +32,13 @@ npm install -g @foundationallabs/agent-rdp
 ### As a Claude Code skill
 
 ```bash
-npx add-skill https://github.com/thisnick/agent-rdp
+npx add-skill https://github.com/foundationallabs/agent-rdp
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/thisnick/agent-rdp
+git clone https://github.com/foundationallabs/agent-rdp
 cd agent-rdp
 pnpm install
 pnpm build      # Build native binary
@@ -192,7 +192,7 @@ agent-rdp does not follow Server Redirection and never advertises support for it
 
 Interact with Windows applications programmatically via the Windows UI Automation API using native patterns (InvokePattern, SelectionItemPattern, TogglePattern, etc.). When enabled, a PowerShell agent is injected into the remote session that captures the accessibility tree and performs actions. Communication between the CLI and the agent uses a Dynamic Virtual Channel (DVC) for fast bidirectional IPC.
 
-For detailed documentation, see [AUTOMATION.md](https://github.com/thisnick/agent-rdp/blob/main/docs/AUTOMATION.md).
+For detailed documentation, see [AUTOMATION.md](https://github.com/foundationallabs/agent-rdp/blob/main/docs/AUTOMATION.md).
 
 ```bash
 # Connect with automation enabled
@@ -427,7 +427,7 @@ await rdp.connect({...});
 const streamUrl = rdp.getStreamUrl(); // "ws://127.0.0.1:9224"
 ```
 
-For the complete WebSocket protocol specification (message types, clipboard flow, input handling), see [WEBSOCKET.md](https://github.com/thisnick/agent-rdp/blob/main/docs/WEBSOCKET.md).
+For the complete WebSocket protocol specification (message types, clipboard flow, input handling), see [WEBSOCKET.md](https://github.com/foundationallabs/agent-rdp/blob/main/docs/WEBSOCKET.md).
 
 ## Architecture
 
