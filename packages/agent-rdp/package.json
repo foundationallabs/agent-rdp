@@ -1,6 +1,6 @@
 {
   "name": "@foundationallabs/agent-rdp",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "CLI tool for AI agents to control Windows Remote Desktop sessions",
   "repository": {
     "type": "git",
@@ -28,7 +28,7 @@
   ],
   "scripts": {
     "build:ts": "tsc",
-    "test": "node --test --test-timeout=20000",
+    "test": "node --test --test-timeout=20000 \"test/*.test.mjs\"",
     "prepublishOnly": "npm run build:ts"
   },
   "keywords": [

@@ -10,7 +10,7 @@ pub mod commands;
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Session name
-    #[arg(long, default_value = "default", env = "AGENT_RDP_SESSION")]
+    #[arg(long, default_value = "default", env = "AGENT_RDP_SESSION", value_parser = parse_session_name)]
     pub session: String,
 
     /// Output in JSON format for AI consumption
@@ -27,6 +27,13 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Commands,
+}
+
+/// Clap value parser for `--session` / `AGENT_RDP_SESSION`.
+fn parse_session_name(name: &str) -> Result<String, String> {
+    agent_rdp_daemon::validate_session_name(name)
+        .map(|()| name.to_string())
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Subcommand)]
@@ -80,6 +87,10 @@ pub struct ViewArgs {
     /// WebSocket streaming port to connect to
     #[arg(long, default_value = "9224")]
     pub port: u16,
+
+    /// Stream token from the connect output (`stream_token`); the stream rejects requests without it
+    #[arg(long, env = "AGENT_RDP_STREAM_TOKEN")]
+    pub token: Option<String>,
 }
 
 /// Connect command arguments.

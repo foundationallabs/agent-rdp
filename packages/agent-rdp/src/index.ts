@@ -24,6 +24,7 @@
 
 import { IpcClient } from './client.js';
 import { DaemonManager } from './daemon.js';
+import { validateSessionName } from './paths.js';
 import { AutomationController } from './automation.js';
 import {
   ConnectOptions,
@@ -49,13 +50,36 @@ import {
 // Re-export types
 export * from './types.js';
 export { AutomationController } from './automation.js';
+// Path helpers. `verifySessionDirs` throws `invalid_request` when a session's state directories
+// are not owned by the current user or are writable by others (the SDK runs it before it
+// connects to a daemon). `verifyStateDir` checks the state directory alone. Their documentation
+// says what they do not cover.
+export {
+  getSessionDir,
+  getSocketPath,
+  getPidPath,
+  getStateDir,
+  readDaemonPid,
+  validateSessionName,
+  verifySessionDirs,
+  verifyStateDir,
+  type PathOptions,
+} from './paths.js';
 
 export interface RdpSessionOptions {
   /** Session name (default: 'default') */
   session?: string;
   /** Request timeout in milliseconds (default: 30000) */
   timeout?: number;
-  /** WebSocket streaming port (0 = disabled). Connect to ws://127.0.0.1:<port> for frames. */
+  /**
+   * State directory for the daemon's socket and pid file; must be absolute.
+   * Precedence: this option, then `AGENT_RDP_STATE_DIR`, then `/tmp/agent-rdp`.
+   */
+  stateDir?: string;
+  /**
+   * WebSocket streaming port (0 = disabled). Use `getStreamUrl()` for the full URL, which
+   * includes the `?token=` the stream requires.
+   */
   streamPort?: number;
   /** Serve the embedded HTML viewer on the streaming port (default: false). */
   serveViewer?: boolean;
@@ -206,15 +230,18 @@ export class RdpSession {
   private streamQuality: number;
   private daemon: DaemonManager;
   private client: IpcClient | null = null;
+  /** Port and token of the stream the last `connect()` started, as the daemon reported them. */
+  private stream: { port: number; token: string } | null = null;
 
   constructor(options: RdpSessionOptions = {}) {
     this.session = options.session ?? 'default';
+    validateSessionName(this.session);
     this.timeout = options.timeout ?? 30000;
     this.streamPort = options.streamPort ?? 0;
     this.serveViewer = options.serveViewer ?? false;
     this.streamFps = options.streamFps;
     this.streamQuality = options.streamQuality ?? 80;
-    this.daemon = new DaemonManager(this.session, this.streamPort);
+    this.daemon = new DaemonManager(this.session, this.streamPort, { stateDir: options.stateDir });
 
     this.mouse = new MouseController(this);
     this.keyboard = new KeyboardController(this);
@@ -243,6 +270,7 @@ export class RdpSession {
    * @param options.enableWinAutomation Enable Windows UI Automation
    */
   async connect(options: ConnectOptions): Promise<ConnectResult> {
+    this.stream = null;
     // Ensure daemon is running and connect
     this.client = await this.daemon.ensureRunning();
 
@@ -269,6 +297,10 @@ export class RdpSession {
 
     const response = await this._send(request);
     const data = response.data as Extract<ResponseData, { type: 'connected' }>;
+    this.stream =
+      data.stream_token !== undefined && data.stream_port !== undefined
+        ? { port: data.stream_port, token: data.stream_token }
+        : null;
 
     return {
       host: data.host,
@@ -276,6 +308,7 @@ export class RdpSession {
       height: data.height,
       phases: data.phases,
       credentialBoundary: data.credential_boundary,
+      streamUrl: this.getStreamUrl(),
     };
   }
 
@@ -373,7 +406,11 @@ export class RdpSession {
    * Disconnect from the RDP server.
    */
   async disconnect(): Promise<void> {
-    await this._send({ type: 'disconnect' });
+    try {
+      await this._send({ type: 'disconnect' });
+    } finally {
+      this.stream = null;
+    }
     await this.close();
   }
 
@@ -388,14 +425,20 @@ export class RdpSession {
   }
 
   /**
-   * Get the WebSocket streaming URL, if streaming is enabled.
+   * Get the WebSocket streaming URL, including the `?token=` the stream requires.
    * Connect to this URL to receive JPEG frames.
+   *
+   * The URL uses the port and token the daemon reported for the last `connect()`.
+   *
+   * @returns null unless the daemon reported a stream port and token (it does not when the port
+   *   was in use or a pre-0.10 daemon is running); cleared by `disconnect()`, a new `connect()`,
+   *   and a daemon spawned by this session object.
    */
   getStreamUrl(): string | null {
-    if (this.streamPort === 0) {
+    if (this.stream === null) {
       return null;
     }
-    return `ws://127.0.0.1:${this.streamPort}`;
+    return `ws://127.0.0.1:${this.stream.port}/?token=${encodeURIComponent(this.stream.token)}`;
   }
 
   /**
@@ -404,8 +447,12 @@ export class RdpSession {
    */
   async _send(request: Request): Promise<Response> {
     if (!this.client) {
-      // Auto-connect to daemon if not connected
-      this.client = await this.daemon.ensureRunning();
+      // Auto-connect to the daemon; a daemon spawned just now has no stream
+      const { client, spawned } = await this.daemon.ensureRunningWithStatus();
+      if (spawned) {
+        this.stream = null;
+      }
+      this.client = client;
     }
 
     const response = await this.client.send(request, this.timeout);

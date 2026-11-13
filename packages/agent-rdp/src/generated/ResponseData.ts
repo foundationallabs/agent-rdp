@@ -35,7 +35,15 @@ phases?: Array<ConnectPhase>,
 /**
  * Where the credentials left: `rdp_connect` with NLA on, `logon` with NLA off.
  */
-credential_boundary?: CredentialBoundary, } | { "type": "screenshot", 
+credential_boundary?: CredentialBoundary, 
+/**
+ * Token the stream URL requires (`?token=`); present when a stream server is running after this connect.
+ */
+stream_token?: string, 
+/**
+ * Port the stream server actually listens on; present with `stream_token`.
+ */
+stream_port?: number, } | { "type": "screenshot", 
 /**
  * Image width.
  */

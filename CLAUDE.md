@@ -53,7 +53,7 @@ The main package uses `optionalDependencies` with `os`/`cpu` fields so npm only 
 1. CLI commands spawn a daemon process if one isn't running for the session
 2. Daemon maintains the RDP connection and handles all RDP protocol operations
 3. CLI ↔ Daemon communication via Unix sockets (macOS/Linux) or TCP (Windows)
-4. Session state stored in `/tmp/agent-rdp/<session>/` (Unix) or `%TEMP%\agent-rdp\` (Windows)
+4. Session state stored in `<state dir>/<session>/`; the state dir is `AGENT_RDP_STATE_DIR` (absolute path) if set, else `/tmp/agent-rdp` (Unix) or `%TEMP%\agent-rdp\` (Windows). On Unix the directories are `0700` and the socket and pid file `0600`; clients refuse a session dir not owned by the current user or writable by others (`verify_session_dirs` in the daemon's `paths.rs`, `verifySessionDirs` in the SDK).
 
 ### Key Components
 
@@ -106,6 +106,9 @@ Input sent as `FastPathInputEvent` (mouse via `MousePdu`, keyboard via scancode 
 | `AGENT_RDP_ALTERNATE_SHELL` | Alternate shell to start instead of the desktop |
 | `AGENT_RDP_SESSION` | Session name (default: "default") |
 | `AGENT_RDP_STREAM_PORT` | WebSocket streaming port (0 = disabled) |
+| `AGENT_RDP_STATE_DIR` | Base directory for session state (absolute path; default `/tmp/agent-rdp`) |
+| `AGENT_RDP_STREAM_TOKEN` | Stream token for `agent-rdp view` (same as `--token`; the token comes from `connect`) |
+| `AGENT_RDP_BINARY` | Node.js SDK only: absolute path of the `agent-rdp` binary to spawn instead of the platform package's; an error if it does not exist |
 
 ## Release Process
 

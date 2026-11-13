@@ -124,6 +124,11 @@ export interface ConnectResult {
   phases?: ConnectPhase[];
   /** Where the credentials left: `rdp_connect` with NLA on, `logon` with NLA off. */
   credentialBoundary?: CredentialBoundary;
+  /**
+   * The authenticated stream URL, or null when the daemon did not start the stream: the port was
+   * in use, or a pre-0.10 daemon is still running for this session.
+   */
+  streamUrl: string | null;
 }
 
 /** Options for taking a screenshot. */

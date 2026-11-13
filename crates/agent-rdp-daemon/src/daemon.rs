@@ -352,7 +352,7 @@ async fn process_request(
         }
 
         Request::Disconnect => {
-            handlers::connect::handle_disconnect(rdp_session, automation_state, ws_handle).await
+            handlers::connect::handle_disconnect(rdp_session, automation_state, ws_handle, clipboard_changed_rx).await
         }
 
         Request::Screenshot(params) => {

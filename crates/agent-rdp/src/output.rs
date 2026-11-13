@@ -1,5 +1,6 @@
 //! Output formatting for CLI responses.
 
+use agent_rdp_daemon::stream_auth::stream_url;
 use agent_rdp_protocol::Response;
 
 /// Output formatter.
@@ -50,9 +51,17 @@ impl Output {
                 host,
                 width,
                 height,
+                stream_token,
+                stream_port,
                 ..
             } => {
                 println!("Connected to {} ({}x{})", host, width, height);
+                if let Some(token) = stream_token {
+                    match stream_port {
+                        Some(port) => println!("Stream: {}", stream_url("ws", "127.0.0.1", *port, token)),
+                        None => println!("Stream token: {}", token),
+                    }
+                }
             }
             ResponseData::Screenshot { width, height, format, .. } => {
                 println!("Screenshot: {}x{} ({})", width, height, format);

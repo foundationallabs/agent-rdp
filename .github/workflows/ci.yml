@@ -28,6 +28,8 @@ jobs:
               - '**/*.rs'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
+              - 'packages/agent-rdp/src/**'
+              - 'packages/agent-rdp/test/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust
@@ -54,6 +56,27 @@ jobs:
       - name: Test
         if: steps.filter.outputs.rust == 'true'
         run: cargo test
+
+      # Parity: the SDK's path helpers must match the real daemon's on-disk layout.
+      - name: Setup Node.js (daemon layout test)
+        if: steps.filter.outputs.rust == 'true' && runner.os == 'Linux'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+
+      - name: Install pnpm (daemon layout test)
+        if: steps.filter.outputs.rust == 'true' && runner.os == 'Linux'
+        uses: pnpm/action-setup@eae0cfeb286e66ffb5155f1a79b90583a127a68b # v2.4.1
+        with:
+          version: 9
+
+      - name: Daemon layout test
+        if: steps.filter.outputs.rust == 'true' && runner.os == 'Linux'
+        run: |
+          pnpm install --ignore-scripts
+          pnpm --filter ./packages/agent-rdp run build:ts
+          cd packages/agent-rdp
+          AGENT_RDP_TEST_BINARY="$GITHUB_WORKSPACE/target/debug/agent-rdp" node --test test/daemon-layout.test.mjs
 
       - name: Skip message
         if: steps.filter.outputs.rust != 'true'

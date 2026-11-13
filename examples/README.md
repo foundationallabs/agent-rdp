@@ -58,7 +58,7 @@ Browser-based viewer for debugging and interactive control.
 
 2. Open `viewer.html` in a browser
 
-3. Connect to `ws://localhost:9224`
+3. Connect to `ws://localhost:9224/?token=<token>`; the token is printed by `connect` (or use the SDK's `getStreamUrl()`)
 
 **Features:**
 - Live desktop frame streaming (JPEG)

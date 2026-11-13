@@ -13,6 +13,12 @@ use cli::{Cli, Commands};
 
 #[tokio::main]
 async fn main() {
+    // A bad AGENT_RDP_STATE_DIR must fail before anything touches the state directory
+    if let Err(e) = agent_rdp_daemon::check_state_dir() {
+        eprintln!("Error: {}", e);
+        std::process::exit(2);
+    }
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())

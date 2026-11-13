@@ -288,10 +288,11 @@ agent-rdp connect    # Uses env vars for connection
 # Enable streaming viewer on port 9224
 agent-rdp --stream-port 9224 connect --host 192.168.1.100 -u Admin -p secret
 
-# Open web viewer in browser
-agent-rdp view --port 9224
+# Open web viewer in browser (connect prints the stream URL and token; the stream refuses requests without it)
+agent-rdp view --port 9224 --token <token>
 
-# Or manually access WebSocket at ws://localhost:9224 (broadcasts JPEG frames)
+# Or manually access the WebSocket at ws://localhost:9224/?token=<token> (broadcasts JPEG frames).
+# The token is printed by connect (`stream_token` with --json); the SDK's getStreamUrl() returns the full URL.
 ```
 
 ## Tips

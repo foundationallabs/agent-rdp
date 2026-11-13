@@ -6,91 +6,48 @@
 pub mod automation;
 pub mod daemon;
 pub mod handlers;
+mod http_head;
 pub mod ipc_server;
 pub mod logon;
 pub mod ocr;
+pub mod paths;
 pub mod rdp_session;
 pub mod rdpdr;
+pub mod stream_auth;
 pub mod tls;
 pub mod ws_input;
 pub mod ws_server;
 
 pub use daemon::{Daemon, SharedWsHandle};
 pub use ipc_server::IpcServer;
+pub use paths::{
+    check_state_dir, cleanup_session, ensure_session_dirs, get_base_dir, get_pid_path,
+    get_session_dir, get_session_port, get_socket_path, resolve_base_dir, validate_session_name,
+    verify_base_dir, verify_session_dirs, write_pid_file, PathsError, STATE_DIR_ENV,
+};
 pub use rdp_session::RdpSession;
-
-/// Get the base directory for all agent-rdp sessions.
-pub fn get_base_dir() -> std::path::PathBuf {
-    #[cfg(unix)]
-    {
-        std::path::PathBuf::from("/tmp/agent-rdp")
-    }
-    #[cfg(windows)]
-    {
-        let temp = std::env::var("TEMP")
-            .or_else(|_| std::env::var("TMP"))
-            .unwrap_or_else(|_| "C:\\Windows\\Temp".to_string());
-        std::path::PathBuf::from(format!("{}\\agent-rdp", temp))
-    }
-}
-
-/// Get the session directory path.
-pub fn get_session_dir(session: &str) -> std::path::PathBuf {
-    get_base_dir().join(session)
-}
-
-/// Get the socket path for a session.
-pub fn get_socket_path(session: &str) -> std::path::PathBuf {
-    #[cfg(unix)]
-    {
-        get_session_dir(session).join("socket")
-    }
-    #[cfg(windows)]
-    {
-        // On Windows, we use a named pipe path
-        std::path::PathBuf::from(format!("\\\\.\\pipe\\agent-rdp-{}", session))
-    }
-}
-
-/// Get the PID file path for a session.
-pub fn get_pid_path(session: &str) -> std::path::PathBuf {
-    get_session_dir(session).join("pid")
-}
-
-/// Get the TCP port for a session (Windows fallback).
-/// Uses a deterministic hash of the session name to derive a port in the range 49152-65535.
-pub fn get_session_port(session: &str) -> u16 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    session.hash(&mut hasher);
-    let hash = hasher.finish();
-    // Map to ephemeral port range: 49152-65535 (16384 ports)
-    49152 + (hash % 16384) as u16
-}
-
-/// Clean up a session directory.
-pub fn cleanup_session(session: &str) {
-    let dir = get_session_dir(session);
-    let _ = std::fs::remove_dir_all(&dir);
-}
 
 /// Run the daemon server for the given session.
 /// This is the main entry point called by `agent-rdp session daemon`.
 pub async fn run_server(session: &str) -> anyhow::Result<()> {
-    use std::io::Write;
+    // Refuse an over-long socket path before anything is written
+    #[cfg(unix)]
+    paths::check_socket_path_len(&get_socket_path(session))?;
 
-    // Create session directory
-    let session_dir = get_session_dir(session);
-    std::fs::create_dir_all(&session_dir)?;
+    // Create the base and session directories (private session dir on Unix)
+    ensure_session_dirs(session)?;
 
     // Write PID file
-    let pid_path = get_pid_path(session);
-    let mut pid_file = std::fs::File::create(&pid_path)?;
-    writeln!(pid_file, "{}", std::process::id())?;
-    drop(pid_file);
+    write_pid_file(&get_pid_path(session))?;
 
-    // Create and run daemon
-    let mut daemon = Daemon::new(session.to_string()).await?;
+    // Create and run daemon; a failed start must not leave the session directory behind
+    let mut daemon = match Daemon::new(session.to_string()).await {
+        Ok(daemon) => daemon,
+        Err(e) => {
+            cleanup_session(session);
+            return Err(e);
+        }
+    };
     let result = daemon.run().await;
 
     // Cleanup on exit
