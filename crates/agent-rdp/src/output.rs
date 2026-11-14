@@ -1,7 +1,7 @@
 //! Output formatting for CLI responses.
 
 use agent_rdp_daemon::stream_auth::stream_url;
-use agent_rdp_protocol::Response;
+use agent_rdp_protocol::{ErrorCode, Response};
 
 /// Output formatter.
 pub struct Output {
@@ -58,12 +58,19 @@ impl Output {
                 println!("Connected to {} ({}x{})", host, width, height);
                 if let Some(token) = stream_token {
                     match stream_port {
-                        Some(port) => println!("Stream: {}", stream_url("ws", "127.0.0.1", *port, token)),
+                        Some(port) => {
+                            println!("Stream: {}", stream_url("ws", "127.0.0.1", *port, token))
+                        }
                         None => println!("Stream token: {}", token),
                     }
                 }
             }
-            ResponseData::Screenshot { width, height, format, .. } => {
+            ResponseData::Screenshot {
+                width,
+                height,
+                format,
+                ..
+            } => {
                 println!("Screenshot: {}x{} ({})", width, height, format);
             }
             ResponseData::Clipboard { text } => {
@@ -127,8 +134,10 @@ impl Output {
                     println!("States: {}", element.states.join(", "));
                 }
                 if let Some(ref bounds) = element.bounds {
-                    println!("Bounds: {}x{} at ({}, {})",
-                        bounds.width, bounds.height, bounds.x, bounds.y);
+                    println!(
+                        "Bounds: {}x{} at ({}, {})",
+                        bounds.width, bounds.height, bounds.x, bounds.y
+                    );
                 }
             }
             ResponseData::WindowList { windows } => {
@@ -137,10 +146,18 @@ impl Output {
                 } else {
                     for window in windows {
                         let process = window.process_name.as_deref().unwrap_or("-");
-                        println!("{}: {} ({})", window.title, process,
-                            if window.minimized { "minimized" }
-                            else if window.maximized { "maximized" }
-                            else { "normal" });
+                        println!(
+                            "{}: {} ({})",
+                            window.title,
+                            process,
+                            if window.minimized {
+                                "minimized"
+                            } else if window.maximized {
+                                "maximized"
+                            } else {
+                                "normal"
+                            }
+                        );
                     }
                 }
             }
@@ -180,16 +197,26 @@ impl Output {
                 } else {
                     println!("Found {} match(es):", result.matches.len());
                     for m in &result.matches {
-                        println!("  '{}' at ({}, {}) size {}x{} - center: ({}, {})",
-                            m.text, m.x, m.y, m.width, m.height, m.center_x, m.center_y);
+                        println!(
+                            "  '{}' at ({}, {}) size {}x{} - center: ({}, {})",
+                            m.text, m.x, m.y, m.width, m.height, m.center_x, m.center_y
+                        );
                     }
                 }
             }
             ResponseData::ClickResult(result) => {
                 if result.method == "double_click" {
-                    println!("Double-clicked at ({}, {})", result.x.unwrap_or(0), result.y.unwrap_or(0));
+                    println!(
+                        "Double-clicked at ({}, {})",
+                        result.x.unwrap_or(0),
+                        result.y.unwrap_or(0)
+                    );
                 } else {
-                    println!("Clicked at ({}, {})", result.x.unwrap_or(0), result.y.unwrap_or(0));
+                    println!(
+                        "Clicked at ({}, {})",
+                        result.x.unwrap_or(0),
+                        result.y.unwrap_or(0)
+                    );
                 }
             }
         }
@@ -270,16 +297,8 @@ impl Output {
         }
     }
 
-    /// Print an error message.
-    pub fn print_error(&self, code: &str, message: &str) {
-        if self.json {
-            let response = agent_rdp_protocol::Response::error(
-                agent_rdp_protocol::ErrorCode::InternalError,
-                message,
-            );
-            println!("{}", serde_json::to_string(&response).unwrap());
-        } else {
-            eprintln!("Error [{}]: {}", code, message);
-        }
+    /// Print an error the CLI detected itself, formatted like a daemon error response.
+    pub fn print_error(&self, code: ErrorCode, message: &str) {
+        self.print_response(&Response::error(code, message));
     }
 }

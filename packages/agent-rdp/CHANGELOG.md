@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.1
+
+### Bug Fixes
+
+* With `--json`, every command failure (argument-parsing errors excepted) prints one JSON error response on stdout with its real error code. Errors the CLI detected itself always reported `internal_error`, and failures returned from a command (for example a broken daemon connection or a request timeout) printed a log line instead of JSON. They now report `invalid_request`, `daemon_not_running`, `ipc_error`, `timeout` or `internal_error`. A bad `AGENT_RDP_STATE_DIR` is reported the same way (exit status 2). `view --json` no longer prints the URL before a failed browser launch.
+
+### Behavior Changes
+
+* Without `--json`, CLI-detected errors show the protocol code, as daemon errors already did (`Error [invalid request]: ...` instead of `Error [invalid_drive]: ...`), and command failures print `Error [<code>]: ...` to stderr instead of a log line.
+* Logs (`RUST_LOG`) go to stderr, so stdout carries only command output.
+
 ## 0.10.0
 
 ### Features

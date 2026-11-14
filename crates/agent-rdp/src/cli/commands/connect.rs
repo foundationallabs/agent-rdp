@@ -3,7 +3,7 @@
 use std::io::{self, BufRead};
 use std::path::Path;
 
-use agent_rdp_protocol::{ConnectRequest, DriveMapping, Request};
+use agent_rdp_protocol::{ConnectRequest, DriveMapping, ErrorCode, Request};
 
 use crate::cli::ConnectArgs;
 use crate::output::Output;
@@ -78,16 +78,22 @@ fn parse_drive_mappings(drives: &[String], output: &Output) -> anyhow::Result<Ve
 
             if path.is_empty() {
                 output.print_error(
-                    "invalid_drive",
-                    &format!("Invalid drive mapping '{}': path cannot be empty", drive_spec),
+                    ErrorCode::InvalidRequest,
+                    &format!(
+                        "Invalid drive mapping '{}': path cannot be empty",
+                        drive_spec
+                    ),
                 );
                 std::process::exit(1);
             }
 
             if name.is_empty() {
                 output.print_error(
-                    "invalid_drive",
-                    &format!("Invalid drive mapping '{}': name cannot be empty", drive_spec),
+                    ErrorCode::InvalidRequest,
+                    &format!(
+                        "Invalid drive mapping '{}': name cannot be empty",
+                        drive_spec
+                    ),
                 );
                 std::process::exit(1);
             }
@@ -98,7 +104,7 @@ fn parse_drive_mappings(drives: &[String], output: &Output) -> anyhow::Result<Ve
 
             if !path_ref.exists() {
                 output.print_error(
-                    "invalid_drive",
+                    ErrorCode::InvalidRequest,
                     &format!("Drive path '{}' does not exist", expanded_path),
                 );
                 std::process::exit(1);
@@ -106,7 +112,7 @@ fn parse_drive_mappings(drives: &[String], output: &Output) -> anyhow::Result<Ve
 
             if !path_ref.is_dir() {
                 output.print_error(
-                    "invalid_drive",
+                    ErrorCode::InvalidRequest,
                     &format!("Drive path '{}' is not a directory", expanded_path),
                 );
                 std::process::exit(1);
@@ -118,7 +124,7 @@ fn parse_drive_mappings(drives: &[String], output: &Output) -> anyhow::Result<Ve
             });
         } else {
             output.print_error(
-                "invalid_drive",
+                ErrorCode::InvalidRequest,
                 &format!(
                     "Invalid drive mapping '{}': expected format /path:DriveName",
                     drive_spec
@@ -147,7 +153,7 @@ fn get_password(args: &ConnectArgs, output: &Output) -> anyhow::Result<String> {
 
     // No password provided
     output.print_error(
-        "missing_password",
+        ErrorCode::InvalidRequest,
         "Password required. Use --password, AGENT_RDP_PASSWORD env var, or --password-stdin",
     );
     std::process::exit(1);
@@ -222,14 +228,21 @@ mod tests {
     #[test]
     fn server_cert_pin_flag_is_passed_through() {
         let pin = "sha256/v0ED3aaQaqkZx0eWMgIKcV21wFokPfvCkSa1dZpbHNA=";
-        assert_eq!(request_for(&["--server-cert-pin", pin]).server_cert_pin.as_deref(), Some(pin));
+        assert_eq!(
+            request_for(&["--server-cert-pin", pin])
+                .server_cert_pin
+                .as_deref(),
+            Some(pin)
+        );
         assert_eq!(request_for(&[]).server_cert_pin, None);
     }
 
     #[test]
     fn connect_request_carries_other_cli_fields() {
         let request = build_connect_request(
-            parse_connect(&["--port", "4489", "-d", "CORP", "--width", "1920", "--height", "1080"]),
+            parse_connect(&[
+                "--port", "4489", "-d", "CORP", "--width", "1920", "--height", "1080",
+            ]),
             "pw".to_string(),
             vec![DriveMapping {
                 path: "/tmp/x".to_string(),
