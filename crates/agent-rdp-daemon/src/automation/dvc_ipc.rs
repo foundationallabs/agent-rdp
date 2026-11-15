@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_rdp_protocol::AutomateRequest;
+use ironrdp_dvc::pdu::DrdynvcDataPdu;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing::{debug, error, trace};
@@ -16,6 +17,22 @@ use super::dvc_channel::{DvcError, DvcProtocolMessage, DvcSendCommand, SharedDvc
 
 /// Number of consecutive failures before suggesting reconnection.
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 3;
+
+/// Largest encoded request the daemon sends. Each request goes out as a single DVC Data PDU,
+/// and the agent reads one message per read without reassembling fragments, so anything larger
+/// is dropped on the way and would only surface as a timeout.
+const MAX_REQUEST_BYTES: usize = DrdynvcDataPdu::MAX_DATA_SIZE;
+
+/// A request that does not fit in one DVC message. Returned before anything is sent.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "automation request is {size} bytes encoded; the limit is {limit} bytes. \
+     Shorten the command (for a long script, write it to a file in pieces and run the file)"
+)]
+pub(crate) struct RequestTooLarge {
+    pub(crate) size: usize,
+    pub(crate) limit: usize,
+}
 
 /// DVC-based IPC client for communicating with the PowerShell agent.
 #[derive(Debug, Clone)]
@@ -111,6 +128,13 @@ impl DvcIpc {
 
         // Encode the message
         let encoded = Self::encode_message(&msg)?;
+        if encoded.len() > MAX_REQUEST_BYTES {
+            return Err(RequestTooLarge {
+                size: encoded.len(),
+                limit: MAX_REQUEST_BYTES,
+            }
+            .into());
+        }
 
         // Create oneshot channel for response
         let (tx, rx) = oneshot::channel();
@@ -233,6 +257,7 @@ impl DvcIpc {
 mod tests {
     use super::*;
     use crate::automation::dvc_channel::new_shared_dvc_state;
+    use tokio::sync::mpsc;
 
     #[test]
     fn test_serialize_snapshot_request() {
@@ -273,5 +298,77 @@ mod tests {
         let state = new_shared_dvc_state();
         let ipc = DvcIpc::new(state);
         assert!(!ipc.is_ready());
+    }
+
+    /// An IPC client whose channel is open, plus the receiver standing in for the RDP session.
+    fn open_ipc() -> (DvcIpc, mpsc::UnboundedReceiver<DvcSendCommand>) {
+        let state = new_shared_dvc_state();
+        let (tx, rx) = mpsc::unbounded_channel();
+        {
+            let mut s = state.lock();
+            s.channel_id = Some(7);
+            s.command_tx = Some(tx);
+        }
+        let mut ipc = DvcIpc::new(state);
+        ipc.set_timeout(Duration::from_millis(1));
+        (ipc, rx)
+    }
+
+    /// A `run` request whose encoded message is exactly `len` bytes.
+    fn run_request_encoding_to(ipc: &DvcIpc, len: usize) -> AutomateRequest {
+        let run = |command: String| AutomateRequest::Run {
+            command,
+            args: vec![],
+            wait: true,
+            hidden: true,
+            timeout_ms: 10_000,
+        };
+        let (command, params) = ipc.serialize_request(&run(String::new())).unwrap();
+        // Request ids are always 8 characters.
+        let empty = DvcProtocolMessage::Request {
+            id: "0".repeat(8),
+            command,
+            params,
+        };
+        let base = DvcIpc::encode_message(&empty).unwrap().len();
+        run("a".repeat(len - base))
+    }
+
+    #[tokio::test]
+    async fn oversized_request_is_rejected_without_sending() {
+        let (ipc, mut rx) = open_ipc();
+        let request = run_request_encoding_to(&ipc, MAX_REQUEST_BYTES + 1);
+        ipc.increment_failures();
+
+        for _ in 0..CONSECUTIVE_FAILURE_THRESHOLD + 1 {
+            let err = ipc.send_request(&request).await.unwrap_err();
+            let too_large = err
+                .downcast_ref::<RequestTooLarge>()
+                .expect("RequestTooLarge");
+            assert_eq!(too_large.size, MAX_REQUEST_BYTES + 1);
+            assert_eq!(too_large.limit, MAX_REQUEST_BYTES);
+        }
+
+        assert!(rx.try_recv().is_err(), "nothing reaches the RDP session");
+        assert!(ipc.state.lock().pending.is_empty());
+        assert_eq!(
+            ipc.consecutive_failures(),
+            1,
+            "neither counts toward nor resets the dead-channel check"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_at_the_limit_is_sent() {
+        let (ipc, mut rx) = open_ipc();
+        let request = run_request_encoding_to(&ipc, MAX_REQUEST_BYTES);
+
+        // No agent answers, so the request times out after it was sent.
+        let err = ipc.send_request(&request).await.unwrap_err();
+        assert!(err.downcast_ref::<RequestTooLarge>().is_none());
+
+        let sent = rx.try_recv().expect("request was sent");
+        assert_eq!(sent.channel_id, 7);
+        assert_eq!(sent.data.len(), MAX_REQUEST_BYTES);
     }
 }

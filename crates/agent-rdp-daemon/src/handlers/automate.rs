@@ -9,7 +9,7 @@ use agent_rdp_protocol::{
 use tokio::sync::Mutex;
 use tracing::error;
 
-use crate::automation::SharedAutomationState;
+use crate::automation::{RequestTooLarge, SharedAutomationState};
 use crate::rdp_session::RdpSession;
 
 /// Handle an automation request.
@@ -62,8 +62,17 @@ pub async fn handle(
         Ok(data) => convert_response(request, data),
         Err(e) => {
             error!("Automation request failed: {}", e);
-            Response::error(ErrorCode::AutomationError, e.to_string())
+            Response::error(send_error_code(&e), e.to_string())
         }
+    }
+}
+
+/// Error code for a failed DVC request: a request too large to send is the caller's to fix.
+fn send_error_code(error: &anyhow::Error) -> ErrorCode {
+    if error.is::<RequestTooLarge>() {
+        ErrorCode::InvalidRequest
+    } else {
+        ErrorCode::AutomationError
     }
 }
 
@@ -363,4 +372,22 @@ fn parse_click_response(data: serde_json::Value) -> anyhow::Result<ClickResult> 
         x,
         y,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_request_maps_to_invalid_request() {
+        let too_large = anyhow::Error::from(RequestTooLarge {
+            size: 2000,
+            limit: 1590,
+        });
+        assert_eq!(send_error_code(&too_large), ErrorCode::InvalidRequest);
+        assert_eq!(
+            send_error_code(&anyhow::anyhow!("Timeout waiting for DVC response")),
+            ErrorCode::AutomationError
+        );
+    }
 }

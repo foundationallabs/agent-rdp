@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.2
+
+### Bug Fixes
+
+* An `automate` request whose encoded message exceeds 1590 bytes (one DVC message) now fails at once with `invalid_request` and a message giving its size and the limit. The daemon used to send it anyway; the agent never answered it, the request timed out after 10 seconds, and after three such requests the daemon reported the channel as dead although it still worked. Rejected requests no longer count toward that dead-channel check. Long scripts still need to be staged in pieces (for example written to a file and run with `-File`).
+
 ## 0.10.1
 
 ### Bug Fixes
