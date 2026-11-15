@@ -373,6 +373,45 @@ async fn send_key_press(
     Ok(())
 }
 
+/// Send text as Unicode key events, one character at a time.
+async fn send_text(command_tx: &mpsc::Sender<SessionCommand>, text: &str) -> Result<(), RdpError> {
+    use ironrdp::pdu::input::fast_path::KeyboardFlags;
+
+    for ch in text.chars() {
+        let code = ch as u16;
+        let events = vec![
+            FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::empty(), code),
+            FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::RELEASE, code),
+        ];
+        command_tx
+            .send(SessionCommand::SendInput(events))
+            .await
+            .map_err(|_| RdpError::SessionClosed)?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    Ok(())
+}
+
+/// Keyboard input for a session, usable without the session lock (the stream server takes that
+/// lock for every frame, so a long input sequence must not hold it).
+#[derive(Clone)]
+pub struct SessionKeyboard {
+    command_tx: mpsc::Sender<SessionCommand>,
+}
+
+impl SessionKeyboard {
+    /// Send a key combination (e.g., "super+r", "escape").
+    pub async fn send_key_press(&self, keys: &str) -> Result<(), RdpError> {
+        send_key_press(&self.command_tx, keys).await
+    }
+
+    /// Send text input as Unicode characters.
+    pub async fn send_text(&self, text: &str) -> Result<(), RdpError> {
+        send_text(&self.command_tx, text).await
+    }
+}
+
 fn logon_unconfirmed_after(window: Duration) -> RdpError {
     warn!("No login confirmation from the server within {window:?}; ending the session");
     RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed)
@@ -802,20 +841,14 @@ impl RdpSession {
 
     /// Send text input as Unicode characters.
     pub async fn send_text(&self, text: &str) -> Result<(), RdpError> {
-        use ironrdp::pdu::input::fast_path::KeyboardFlags;
-        use std::time::Duration;
+        send_text(&self.command_tx, text).await
+    }
 
-        for ch in text.chars() {
-            let code = ch as u16;
-            let events = vec![
-                FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::empty(), code),
-                FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::RELEASE, code),
-            ];
-            self.send_input(events).await?;
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    /// A keyboard for this session that does not hold the session lock while it types.
+    pub fn keyboard(&self) -> SessionKeyboard {
+        SessionKeyboard {
+            command_tx: self.command_tx.clone(),
         }
-
-        Ok(())
     }
 
     /// Set clipboard text (will be available when remote pastes).

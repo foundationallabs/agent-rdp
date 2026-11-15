@@ -264,23 +264,15 @@ pub async fn handle(
         let session_dir = crate::get_base_dir();
         let bootstrap = AutomationBootstrap::new(session_dir);
 
-        // Launch the agent via Win+R
-        {
-            let session = rdp_session.lock().await;
-            if let Some(ref rdp) = *session {
-                let auto_state = automation_state.lock().await;
-                if let Err(e) = bootstrap.launch_agent(rdp, &auto_state).await {
-                    warn!("Failed to launch automation agent: {}", e);
-                }
-            }
-        }
-
-        // Wait for handshake
-        {
+        // Take a keyboard rather than holding the session lock: the stream server needs that
+        // lock for every frame while the agent starts. Input from a viewer or another command
+        // can now interleave with the typed launch command; the launch is retried if it is lost.
+        let keyboard = rdp_session.lock().await.as_ref().map(RdpSession::keyboard);
+        if let Some(keyboard) = keyboard {
             let mut auto_state = automation_state.lock().await;
-            if let Err(e) = bootstrap.wait_for_agent(&mut auto_state, 10).await {
-                warn!("Automation agent handshake failed: {}", e);
-                // Don't fail - automation just won't be available
+            if let Err(e) = bootstrap.start_agent(&keyboard, &mut auto_state).await {
+                // Don't fail the connect - automation just won't be available
+                warn!("Automation agent failed to start: {}", e);
             }
         }
     }

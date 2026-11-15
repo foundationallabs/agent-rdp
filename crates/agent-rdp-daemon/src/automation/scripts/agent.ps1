@@ -5,18 +5,15 @@
 # BasePath kept for reference/logging (RDPDR drive still mapped for future file transfer)
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'BasePath')]
 param(
-    [string]$BasePath = "\\TSCLIENT\agent-automation"
+    [string]$BasePath = "\\TSCLIENT\agent-automation",
+    # Set by the daemon; of the agents started with the same ID, only one runs
+    [string]$LaunchId = ""
 )
 
 # ============ SETUP ============
 
 # Set window title for easy identification
 $Host.UI.RawUI.WindowTitle = "agent-rdp automation"
-
-# Load UI Automation assemblies
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName System.Windows.Forms
 
 # Global state
 $script:RefMap = @{}  # ref number -> AutomationElement mapping
@@ -38,6 +35,32 @@ function Write-Log {
         Add-Content -Path $script:LocalLogPath -Value $logEntry -ErrorAction SilentlyContinue
     } catch {}
 }
+
+# ============ SINGLE INSTANCE ============
+
+# The daemon launches again when no handshake arrives in time, so a slow first agent may still be
+# starting. Only one agent per launch may hold the DVC channel. A later agent waits a while in case
+# the first one dies while starting, then exits. If the check itself fails, carry on.
+$script:LaunchMutex = $null
+if ($LaunchId) {
+    $owned = $true
+    try {
+        $script:LaunchMutex = New-Object System.Threading.Mutex($false, "Local\agent-rdp-$LaunchId")
+        $owned = $script:LaunchMutex.WaitOne([TimeSpan]::FromSeconds(30))
+    } catch {
+        # An abandoned mutex (its agent died) is acquired by this call and lands here too.
+        Write-Log "Launch check: $($_.Exception.Message)" "WARN"
+    }
+    if (-not $owned) {
+        Write-Log "Another agent runs for launch $LaunchId; exiting"
+        exit 0
+    }
+}
+
+# Load UI Automation assemblies
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Windows.Forms
 
 # ============ LOAD LIBRARY FILES ============
 

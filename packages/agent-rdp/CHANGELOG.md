@@ -5,6 +5,7 @@
 ### Bug Fixes
 
 * An `automate` request whose encoded message exceeds 1590 bytes (one DVC message) now fails at once with `invalid_request` and a message giving its size and the limit. The daemon used to send it anyway; the agent never answered it, the request timed out after 10 seconds, and after three such requests the daemon reported the channel as dead although it still worked. Rejected requests no longer count toward that dead-channel check. Long scripts still need to be staged in pieces (for example written to a file and run with `-File`).
+* With `--enable-win-automation`, the daemon now launches the automation agent a second time when it does not answer within 10 seconds. It used to press Win+R and type the launch command once, after fixed delays; when the desktop was not ready yet (often on a first logon) or the typed command was lost (seen on reconnect), automation stayed unavailable for the whole session. Before relaunching it presses Escape to close a Run dialog or error box left open, then gives the dialog longer to open; both launches fit in about the time the single launch used to take. A first agent that is slow rather than lost and still answers before the relaunch is not launched again; if both start, the later one exits. The WebSocket stream no longer freezes while the launch command is typed.
 
 ## 0.10.1
 
