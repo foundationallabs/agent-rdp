@@ -148,7 +148,8 @@ pub struct ConnectArgs {
     #[arg(long = "drive", value_name = "PATH:NAME")]
     pub drives: Vec<String>,
 
-    /// Enable Windows UI Automation (requires automation agent on remote host)
+    /// Enable Windows UI Automation. Connect then also starts the automation agent, so it is
+    /// allowed longer than --timeout (a first logon can take over a minute).
     #[arg(long)]
     pub enable_win_automation: bool,
 }

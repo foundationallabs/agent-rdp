@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 use parking_lot::RwLock;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
@@ -29,7 +29,7 @@ use ironrdp::session::{ActiveStage, ActiveStageOutput};
 use ironrdp_dvc::DrdynvcClient;
 use ironrdp_rdpdr::Rdpdr;
 
-use crate::automation::{AutomationDvc, SharedDvcState};
+use crate::automation::{AutomationDvc, ScreenSample, SharedDvcState};
 use crate::logon::{self, LogonOutcome, LogonReport, LogonWatch};
 use crate::rdpdr::MultiDriveBackend;
 use crate::tls::{self, CertPin};
@@ -393,14 +393,17 @@ async fn send_text(command_tx: &mpsc::Sender<SessionCommand>, text: &str) -> Res
     Ok(())
 }
 
-/// Keyboard input for a session, usable without the session lock (the stream server takes that
-/// lock for every frame, so a long input sequence must not hold it).
+/// What the automation agent launch needs of a session: the keyboard, the screen and the logon
+/// signal. Usable without the session lock (the stream server takes that lock for every frame,
+/// so a long input sequence must not hold it).
 #[derive(Clone)]
-pub struct SessionKeyboard {
+pub struct SessionDesktop {
     command_tx: mpsc::Sender<SessionCommand>,
+    shared: Arc<RwLock<SharedState>>,
+    logged_on: watch::Receiver<bool>,
 }
 
-impl SessionKeyboard {
+impl SessionDesktop {
     /// Send a key combination (e.g., "super+r", "escape").
     pub async fn send_key_press(&self, keys: &str) -> Result<(), RdpError> {
         send_key_press(&self.command_tx, keys).await
@@ -409,6 +412,27 @@ impl SessionKeyboard {
     /// Send text input as Unicode characters.
     pub async fn send_text(&self, text: &str) -> Result<(), RdpError> {
         send_text(&self.command_tx, text).await
+    }
+
+    /// Whether the server has sent its logon notification by the end of `window`; an error if
+    /// the session ends first.
+    pub async fn logged_on_within(&self, window: Duration) -> Result<bool, RdpError> {
+        let mut logged_on = self.logged_on.clone();
+        let waited = tokio::time::timeout(window, logged_on.wait_for(|on| *on))
+            .await
+            .map(|seen| seen.is_ok());
+        match waited {
+            Ok(true) => Ok(true),
+            Ok(false) => Err(RdpError::SessionClosed),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// The parts of the screen that show whether the Run dialog opened.
+    pub(crate) fn screen_sample(&self) -> ScreenSample {
+        let state = self.shared.read();
+        let image = &state.image;
+        ScreenSample::of(image.width().into(), image.height().into(), image.data())
     }
 }
 
@@ -479,6 +503,8 @@ pub struct RdpSession {
     command_tx: mpsc::Sender<SessionCommand>,
     /// Handle to the background task
     _task_handle: tokio::task::JoinHandle<()>,
+    /// Turns `true` once the server has sent its logon notification.
+    logged_on: watch::Receiver<bool>,
 }
 
 /// Callback type for connection drop notification.
@@ -726,6 +752,7 @@ impl RdpSession {
             None => (None, None),
         };
         let logon_watch = LogonWatch::new(connection_result.io_channel_id, logon_tx);
+        let logged_on = logon_watch.logged_on();
 
         // Create active stage for ongoing communication
         let active_stage = ActiveStage::new(connection_result);
@@ -777,6 +804,7 @@ impl RdpSession {
             shared,
             command_tx,
             _task_handle: task_handle,
+            logged_on,
         })
     }
 
@@ -844,10 +872,12 @@ impl RdpSession {
         send_text(&self.command_tx, text).await
     }
 
-    /// A keyboard for this session that does not hold the session lock while it types.
-    pub fn keyboard(&self) -> SessionKeyboard {
-        SessionKeyboard {
+    /// Keyboard, screen and logon signal for the agent launch, usable without the session lock.
+    pub fn desktop(&self) -> SessionDesktop {
+        SessionDesktop {
             command_tx: self.command_tx.clone(),
+            shared: Arc::clone(&self.shared),
+            logged_on: self.logged_on.clone(),
         }
     }
 

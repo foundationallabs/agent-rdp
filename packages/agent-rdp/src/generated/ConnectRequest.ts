@@ -61,7 +61,8 @@ height: number,
  */
 drives: Array<DriveMapping>, 
 /**
- * Enable Windows UI Automation.
+ * Enable Windows UI Automation. The connect then also waits for the automation agent to
+ * start, up to [`AGENT_START_TIMEOUT_MS`].
  */
 enable_win_automation: boolean, 
 /**

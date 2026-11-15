@@ -26,6 +26,7 @@ import { IpcClient } from './client.js';
 import { DaemonManager } from './daemon.js';
 import { validateSessionName } from './paths.js';
 import { AutomationController } from './automation.js';
+import { AGENT_START_TIMEOUT_MS } from './generated/constants.js';
 import {
   ConnectOptions,
   ConnectResult,
@@ -66,10 +67,19 @@ export {
   type PathOptions,
 } from './paths.js';
 
+/**
+ * The longest a connect with `enableWinAutomation` spends starting the automation agent once the
+ * session is up. `connect()` adds it to the request timeout for such a connect.
+ */
+export { AGENT_START_TIMEOUT_MS };
+
 export interface RdpSessionOptions {
   /** Session name (default: 'default') */
   session?: string;
-  /** Request timeout in milliseconds (default: 30000) */
+  /**
+   * Request timeout in milliseconds (default: 30000). A connect with `enableWinAutomation` gets
+   * `AGENT_START_TIMEOUT_MS` more.
+   */
   timeout?: number;
   /**
    * State directory for the daemon's socket and pid file; must be absolute.
@@ -267,7 +277,8 @@ export class RdpSession {
    * @param options.width Desktop width (default: 1280)
    * @param options.height Desktop height (default: 800)
    * @param options.drives Drives to map
-   * @param options.enableWinAutomation Enable Windows UI Automation
+   * @param options.enableWinAutomation Enable Windows UI Automation. Connect then also starts the
+   *   automation agent, waiting up to `AGENT_START_TIMEOUT_MS` more than the request timeout.
    */
   async connect(options: ConnectOptions): Promise<ConnectResult> {
     this.stream = null;
@@ -295,7 +306,8 @@ export class RdpSession {
       serve_viewer: this.serveViewer,
     };
 
-    const response = await this._send(request);
+    const agentStart = request.enable_win_automation ? AGENT_START_TIMEOUT_MS : 0;
+    const response = await this._send(request, this.timeout + agentStart);
     const data = response.data as Extract<ResponseData, { type: 'connected' }>;
     this.stream =
       data.stream_token !== undefined && data.stream_port !== undefined
@@ -445,7 +457,7 @@ export class RdpSession {
    * Internal: Send a request to the daemon.
    * @internal
    */
-  async _send(request: Request): Promise<Response> {
+  async _send(request: Request, timeout = this.timeout): Promise<Response> {
     if (!this.client) {
       // Auto-connect to the daemon; a daemon spawned just now has no stream
       const { client, spawned } = await this.daemon.ensureRunningWithStatus();
@@ -455,7 +467,7 @@ export class RdpSession {
       this.client = client;
     }
 
-    const response = await this.client.send(request, this.timeout);
+    const response = await this.client.send(request, timeout);
 
     if (!response.success) {
       throw new RdpError(

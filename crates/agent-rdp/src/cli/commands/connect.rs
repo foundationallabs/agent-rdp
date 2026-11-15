@@ -3,7 +3,9 @@
 use std::io::{self, BufRead};
 use std::path::Path;
 
-use agent_rdp_protocol::{ConnectRequest, DriveMapping, ErrorCode, Request};
+use agent_rdp_protocol::{
+    ConnectRequest, DriveMapping, ErrorCode, Request, AGENT_START_TIMEOUT_MS,
+};
 
 use crate::cli::ConnectArgs;
 use crate::output::Output;
@@ -25,9 +27,10 @@ pub async fn run(
     let manager = SessionManager::new(session.to_string());
     let mut client = manager.ensure_daemon().await?;
 
-    let request = Request::Connect(build_connect_request(args, password, drives, stream_port));
+    let connect = build_connect_request(args, password, drives, stream_port);
+    let timeout_ms = connect_timeout_ms(&connect, timeout_ms);
 
-    let response = client.send(&request, timeout_ms).await?;
+    let response = client.send(&Request::Connect(connect), timeout_ms).await?;
     output.print_response(&response);
 
     if !response.success {
@@ -35,6 +38,16 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// The request timeout for `connect`: with Windows automation, connect also waits for the
+/// automation agent to start.
+fn connect_timeout_ms(connect: &ConnectRequest, timeout_ms: u64) -> u64 {
+    if connect.enable_win_automation {
+        timeout_ms.saturating_add(AGENT_START_TIMEOUT_MS)
+    } else {
+        timeout_ms
+    }
 }
 
 /// Map parsed CLI arguments onto the connect request sent to the daemon.
@@ -207,6 +220,17 @@ mod tests {
 
         assert_eq!(from_env.as_deref(), Some(PSM_SHELL));
         assert_eq!(from_flag.as_deref(), Some("other shell"));
+    }
+
+    #[test]
+    fn connect_with_automation_waits_longer_for_the_agent_start() {
+        let automated = request_for(&["--enable-win-automation"]);
+        assert_eq!(
+            connect_timeout_ms(&automated, 30_000),
+            30_000 + AGENT_START_TIMEOUT_MS
+        );
+        assert_eq!(connect_timeout_ms(&request_for(&[]), 30_000), 30_000);
+        assert_eq!(connect_timeout_ms(&automated, u64::MAX), u64::MAX);
     }
 
     #[test]

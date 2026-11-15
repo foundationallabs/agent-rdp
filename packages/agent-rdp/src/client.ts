@@ -18,6 +18,9 @@ export {
 
 const DEFAULT_TIMEOUT = 30000;
 
+/** `setTimeout` fires at once for longer delays. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /**
  * IPC client for communicating with the daemon.
  */
@@ -114,7 +117,7 @@ export class IpcClient {
         this.pendingResolve = null;
         this.pendingReject = null;
         reject(new RdpError('timeout', 'Request timed out'));
-      }, timeout);
+      }, Math.min(timeout, MAX_TIMER_MS));
 
       const originalResolve = resolve;
       this.pendingResolve = (response) => {
