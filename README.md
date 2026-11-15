@@ -459,6 +459,7 @@ The daemon is automatically started on the first command and persists until expl
 ### UI Automation
 
 - **WebViews**: UI Automation cannot interact with WebView content (e.g., Windows Start menu search, Edge browser content, Electron apps). Use `Win+R` or `automate run` to launch programs directly instead of clicking through menus.
+- **Request size**: Each `automate` request must encode to at most 1590 bytes of JSON, the size of one DVC message. That includes the request envelope and JSON escaping, so a `run` command gets roughly 1450 bytes or less. Larger requests fail with `invalid_request`. For long PowerShell, write the script to a file in pieces and run the file.
 - **UAC Dialogs**: User Account Control elevation prompts run on a secure desktop and are not accessible via UI Automation. There is no good workaround - the remote user must interact with UAC manually, or UAC must be disabled (not recommended for security reasons).
 
 ### OCR Fallback

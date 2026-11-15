@@ -14,6 +14,7 @@ pub use dvc_channel::{
     DvcSendCommand, SharedDvcState, CHANNEL_NAME,
 };
 pub use dvc_ipc::DvcIpc;
+pub(crate) use dvc_ipc::RequestTooLarge;
 
 use std::path::PathBuf;
 use std::sync::Arc;
