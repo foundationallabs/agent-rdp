@@ -166,8 +166,8 @@ When `--enable-win-automation` is specified:
       powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "\\TSCLIENT\agent-automation\scripts\agent.ps1" -BasePath "\\TSCLIENT\agent-automation" -LaunchId <id>
       ```
    4. If the typed text does not show in the dialog's area, press Escape instead of Enter and try again
-   5. Press Enter and wait up to 10 s for the DVC handshake; without one, press Escape, keep watching for a late handshake for 2 s, then try again
-9. Return the connect response; without a handshake the session works but automation stays unavailable. Clients allow `AGENT_START_TIMEOUT_MS` (90 s) for this beyond the request timeout
+   5. Press Enter and wait up to 15 s for the DVC handshake; without one, press Escape, keep watching for a late handshake for 2 s, then try again
+9. Return the connect response; without a handshake the session works but automation stays unavailable. Clients allow `AGENT_START_TIMEOUT_MS` (95 s) for this beyond the request timeout
 
 An agent started with a launch ID that another agent already runs under exits at once, so a slow agent and a relaunched one never both serve the channel.
 

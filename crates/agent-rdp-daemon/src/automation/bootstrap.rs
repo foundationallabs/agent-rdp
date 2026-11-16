@@ -41,14 +41,15 @@ struct LaunchPlan {
 
 /// On a first logon the shell takes 17–44 s after the logon notification to answer Win+R, and
 /// the notification comes up to about 12 s after connecting; on a reconnect the shell is
-/// already up. The whole start fits in [`agent_rdp_protocol::AGENT_START_TIMEOUT_MS`].
+/// already up. The agent's handshake came 2–4 s after a launch on later logons and 11.7 s on the
+/// first logon after boot. The whole start fits in [`agent_rdp_protocol::AGENT_START_TIMEOUT_MS`].
 const LAUNCH_PLAN: LaunchPlan = LaunchPlan {
     logon_wait: Duration::from_secs(20),
     launch_until: Duration::from_secs(70),
     screen_poll: Duration::from_millis(100),
     run_dialog_wait: Duration::from_secs(2),
     retry_pause: Duration::from_secs(2),
-    handshake: Duration::from_secs(10),
+    handshake: Duration::from_secs(15),
     key_settle: Duration::from_millis(200),
 };
 

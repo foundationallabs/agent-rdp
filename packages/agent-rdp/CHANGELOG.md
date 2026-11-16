@@ -8,13 +8,13 @@
 * With `--enable-win-automation`, the automation agent now starts on a first logon. The daemon used to press Win+R and type the launch command once, after fixed delays. On a first logon the Windows shell ignores Win+R for 17–44 s after logon, so the command was lost, or typed onto the desktop, where it could select and open an icon. Automation then stayed unavailable for the whole session. The daemon now:
   * waits for the server's logon notification (up to 20 s) before the first launch;
   * types the command only after the screen shows the Run dialog opening bottom-left, and presses Enter only after the typed command shows in it, so a command that lands elsewhere is never entered;
-  * presses Escape and tries again after 2 s when the dialog does not open, the command does not show, or the agent does not answer within 10 s of a launch, until 70 s after the start.
+  * presses Escape and tries again after 2 s when the dialog does not open, the command does not show, or the agent does not answer within 15 s of a launch, until 70 s after the start.
 
   Every launch uses the same launch ID, so if a slow agent and a relaunched one both start, the later one exits. An agent that answers during the pause after Escape is not launched again. The WebSocket stream no longer freezes while the launch command is typed.
 
 ### Behavior Changes
 
-* A connect with Windows automation waits up to 90 s more for the agent to start. The CLI and the SDK add this time (`AGENT_START_TIMEOUT_MS`, now exported by the SDK) to the request timeout of such a connect, so `--timeout` and the `timeout` option keep meaning the time to set up the session. Connects without automation are unchanged.
+* A connect with Windows automation waits up to 95 s more for the agent to start. The CLI and the SDK add this time (`AGENT_START_TIMEOUT_MS`, now exported by the SDK) to the request timeout of such a connect, so `--timeout` and the `timeout` option keep meaning the time to set up the session. Connects without automation are unchanged.
 * The Run dialog check compares screen pixels and assumes the dialog opens in the bottom-left of the screen, as it does on Windows Server 2022 (the version tested). A try is skipped and retried when the bottom-left area was already changing before Win+R, or when the top-right quarter changes broadly as Win+R is pressed (a window opening). Motion already under way in the top-right quarter, such as a video, does not count against the dialog.
 * Starting the agent no longer holds the daemon's automation lock, so a disconnect during the start goes through at once and ends it.
 
