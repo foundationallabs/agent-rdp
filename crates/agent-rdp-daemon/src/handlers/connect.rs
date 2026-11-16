@@ -1,8 +1,11 @@
 //! Connection handler.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use agent_rdp_protocol::{ConnectRequest, DriveMapping, ErrorCode, Response, ResponseData};
+use agent_rdp_protocol::{
+    ConnectRequest, DriveMapping, ErrorCode, Response, ResponseData, AGENT_START_TIMEOUT_MS,
+};
 use tokio::sync::{watch, Mutex};
 use tracing::{info, warn};
 
@@ -264,23 +267,26 @@ pub async fn handle(
         let session_dir = crate::get_base_dir();
         let bootstrap = AutomationBootstrap::new(session_dir);
 
-        // Launch the agent via Win+R
-        {
-            let session = rdp_session.lock().await;
-            if let Some(ref rdp) = *session {
-                let auto_state = automation_state.lock().await;
-                if let Err(e) = bootstrap.launch_agent(rdp, &auto_state).await {
-                    warn!("Failed to launch automation agent: {}", e);
-                }
-            }
-        }
-
-        // Wait for handshake
-        {
-            let mut auto_state = automation_state.lock().await;
-            if let Err(e) = bootstrap.wait_for_agent(&mut auto_state, 10).await {
-                warn!("Automation agent handshake failed: {}", e);
-                // Don't fail - automation just won't be available
+        // Hold neither the session lock nor the automation lock while the agent starts, which
+        // can take over a minute: the stream server needs the session lock for every frame, and
+        // a disconnect needs the automation lock. Input from a viewer or another command can
+        // interleave with the typed launch command; the launch is retried if it is lost.
+        let desktop = rdp_session.lock().await.as_ref().map(RdpSession::desktop);
+        let channel = {
+            let auto_state = automation_state.lock().await;
+            auto_state
+                .dvc_ipc
+                .clone()
+                .map(|dvc_ipc| (dvc_ipc, auto_state.drive_name.clone()))
+        };
+        if let (Some(desktop), Some((dvc_ipc, drive_name))) = (desktop, channel) {
+            let allowed = Duration::from_millis(AGENT_START_TIMEOUT_MS);
+            let start = bootstrap.start_agent(&desktop, &dvc_ipc, &drive_name);
+            // Don't fail the connect - automation just won't be available
+            match tokio::time::timeout(allowed, start).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("Automation agent failed to start: {}", e),
+                Err(_) => warn!("Automation agent did not start within {:?}", allowed),
             }
         }
     }

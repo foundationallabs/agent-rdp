@@ -16,7 +16,7 @@ use ironrdp::pdu::rdp::session_info::{
 };
 use ironrdp::pdu::Action;
 use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tracing::info;
 
 /// How an NLA-off login ended, as reported by the server.
@@ -157,6 +157,7 @@ pub struct LogonWatch {
     report_tx: Option<oneshot::Sender<LogonReport>>,
     awaited: bool,
     confirmed: bool,
+    logged_on: watch::Sender<bool>,
 }
 
 impl LogonWatch {
@@ -167,7 +168,14 @@ impl LogonWatch {
             awaited: report_tx.is_some(),
             report_tx,
             confirmed: false,
+            logged_on: watch::Sender::new(false),
         }
+    }
+
+    /// Turns `true` once the server has sent a logon notification, whether or not `connect()`
+    /// waited for it.
+    pub fn logged_on(&self) -> watch::Receiver<bool> {
+        self.logged_on.subscribe()
     }
 
     /// Peek a server frame. Returns the reason when the server rejected the login, in which
@@ -175,6 +183,7 @@ impl LogonWatch {
     pub fn observe(&mut self, action: Action, frame: &[u8]) -> Option<AuthFailureReason> {
         match logon_outcome(self.io_channel_id, action, frame)? {
             LogonOutcome::Succeeded => {
+                self.logged_on.send_replace(true);
                 // Confirmed only once connect() took it; it may already have given up.
                 self.confirmed |= self.report(LogonReport::Outcome(LogonOutcome::Succeeded));
                 None
@@ -553,6 +562,20 @@ mod tests {
         // when the server sends a second logon notification.
         assert_eq!(watch.observe(Action::X224, &frame), None);
         assert!(!watch.finish(LogonReport::SessionEnded));
+    }
+
+    #[test]
+    fn watch_signals_the_logon_with_or_without_a_waiting_connect() {
+        for report_tx in [Some(oneshot::channel().0), None] {
+            let mut watch = LogonWatch::new(IO_CHANNEL, report_tx);
+            let logged_on = watch.logged_on();
+            watch.observe(Action::X224, &bad_password_frame());
+            assert!(!*logged_on.borrow(), "a rejected login is no logon");
+            let frame =
+                save_session_info_frame(IO_CHANNEL, InfoType::PlainNotify, InfoData::PlainNotify);
+            watch.observe(Action::X224, &frame);
+            assert!(*logged_on.borrow());
+        }
     }
 
     #[test]

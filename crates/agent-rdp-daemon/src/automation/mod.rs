@@ -7,6 +7,7 @@
 mod bootstrap;
 pub mod dvc_channel;
 mod dvc_ipc;
+mod run_dialog;
 
 pub use bootstrap::AutomationBootstrap;
 pub use dvc_channel::{
@@ -15,6 +16,7 @@ pub use dvc_channel::{
 };
 pub use dvc_ipc::DvcIpc;
 pub(crate) use dvc_ipc::RequestTooLarge;
+pub(crate) use run_dialog::{ScreenBefore, ScreenSample};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,10 +38,6 @@ pub struct AutomationState {
     pub dvc_ipc: Option<DvcIpc>,
     /// Shared DVC state (for processor access).
     pub dvc_state: Option<SharedDvcState>,
-    /// Whether the agent has completed handshake.
-    pub agent_ready: bool,
-    /// Agent process ID (if known).
-    pub agent_pid: Option<u32>,
 }
 
 impl AutomationState {
@@ -55,8 +53,6 @@ impl AutomationState {
             drive_name: "agent-automation".to_string(),
             dvc_ipc: None,
             dvc_state: None,
-            agent_ready: false,
-            agent_pid: None,
         }
     }
 

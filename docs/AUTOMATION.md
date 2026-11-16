@@ -157,15 +157,19 @@ When `--enable-win-automation` is specified:
 4. Write embedded `agent.ps1` to `scripts/agent.ps1`
 5. Register drive mapping with RDPDR channel as `agent-automation`
 6. Set up DVC channel (`AgentRdp::Automation`) via DrdynvcClient
-7. Wait 2-3 seconds for Windows desktop stabilization
-8. Send Win+R keystroke to open Run dialog
-9. Type PowerShell launch command:
-   ```
-   powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "\\TSCLIENT\agent-automation\scripts\agent.ps1"
-   ```
-10. Press Enter
-11. Wait for DVC handshake message
-12. Return success or timeout error
+7. Wait up to 20 s for the server's logon notification (about 1 s on a reconnect; 3–12 s on a first logon)
+8. Until 70 s after the start, try to launch the agent:
+   1. Sample the screen twice, then press Win+R
+   2. Wait up to 2 s for the Run dialog: the bottom-left area changes on two looks in a row while the top-right quarter stays as it was (motion already there before Win+R is ignored). If it does not open (on a first logon the shell ignores Win+R for 17–44 s), press Escape and try again 2 s later
+   3. Type the launch command, which carries a launch ID shared by every try:
+      ```
+      powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "\\TSCLIENT\agent-automation\scripts\agent.ps1" -BasePath "\\TSCLIENT\agent-automation" -LaunchId <id>
+      ```
+   4. If the typed text does not show in the dialog's area, press Escape instead of Enter and try again
+   5. Press Enter and wait up to 15 s for the DVC handshake; without one, press Escape, keep watching for a late handshake for 2 s, then try again
+9. Return the connect response; without a handshake the session works but automation stays unavailable. Clients allow `AGENT_START_TIMEOUT_MS` (95 s) for this beyond the request timeout
+
+An agent started with a launch ID that another agent already runs under exits at once, so a slow agent and a relaunched one never both serve the channel.
 
 **Note**: RDPDR drive mapping is still used for bootstrapping (launching the agent), but all subsequent IPC uses DVC.
 

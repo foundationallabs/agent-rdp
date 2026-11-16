@@ -21,9 +21,10 @@ const CONNECTED = { success: true, data: { type: 'connected', host: 'h', width: 
 
 /**
  * Start a fake daemon for a fresh session; resolves with the session name and received requests.
- * `response` may be a function returning the response, to vary it per request.
+ * `response` may be a function returning the response, to vary it per request. Each reply is
+ * sent `replyAfterMs` after its request.
  */
-async function startFakeDaemon(response = CONNECTED) {
+async function startFakeDaemon(response = CONNECTED, { replyAfterMs = 0 } = {}) {
   const session = `sdk-test-${randomUUID().slice(0, 8)}`;
   const dir = getSessionDir(session);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); // clients refuse looser session dirs
@@ -43,7 +44,7 @@ async function startFakeDaemon(response = CONNECTED) {
         buffer = buffer.slice(idx + 1);
         requests.push(JSON.parse(line));
         const reply = typeof response === 'function' ? response() : response;
-        socket.write(JSON.stringify(reply) + '\n');
+        setTimeout(() => socket.destroyed || socket.write(JSON.stringify(reply) + '\n'), replyAfterMs);
       }
     });
   });
@@ -308,6 +309,19 @@ test('a re-created IPC client keeps the stream URL when no new daemon was spawne
     await rdp.close();
     await rdp.getInfo();
     assert.equal(rdp.getStreamUrl(), url);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test('a connect with automation waits past the request timeout for the agent start', async () => {
+  const daemon = await startFakeDaemon(CONNECTED, { replyAfterMs: 500 });
+  try {
+    const rdp = new RdpSession({ session: daemon.session, timeout: 100 });
+    const options = { host: 'h', username: 'u', password: 'p' };
+    await assert.rejects(rdp.connect(options), (error) => error.code === 'timeout');
+    await rdp.close();
+    await rdp.connect({ ...options, enableWinAutomation: true });
   } finally {
     await daemon.close();
   }

@@ -59,6 +59,11 @@ pub struct DriveMapping {
     pub name: String,
 }
 
+/// The longest a connect with `enable_win_automation` spends starting the automation agent after
+/// the session is up. Clients add it to their request timeout for such a connect. The
+/// TypeScript SDK gets it from `generated/constants.ts`, written from this by the codegen test.
+pub const AGENT_START_TIMEOUT_MS: u64 = 95_000;
+
 /// RDP connection parameters.
 // `Debug` is implemented by hand to redact the password.
 #[derive(Clone, Serialize, Deserialize, TS)]
@@ -117,7 +122,8 @@ pub struct ConnectRequest {
     #[serde(default)]
     pub drives: Vec<DriveMapping>,
 
-    /// Enable Windows UI Automation.
+    /// Enable Windows UI Automation. The connect then also waits for the automation agent to
+    /// start, up to [`AGENT_START_TIMEOUT_MS`].
     #[serde(default)]
     pub enable_win_automation: bool,
 
