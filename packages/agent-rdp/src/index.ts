@@ -199,6 +199,14 @@ export class ClipboardController {
   async set(options: ClipboardSetOptions): Promise<void> {
     await this.rdp._send({ type: 'clipboard', action: 'set', text: options.text });
   }
+
+  /**
+   * Paste text into the focused window with Ctrl+V. Rejects with `clipboard_error`, having
+   * pasted nothing, when the remote does not take the text, so the caller can type it instead.
+   */
+  async paste(options: ClipboardSetOptions): Promise<void> {
+    await this.rdp._send({ type: 'clipboard', action: 'paste', text: options.text });
+  }
 }
 
 /**

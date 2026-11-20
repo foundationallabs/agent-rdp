@@ -154,6 +154,9 @@ To click the first match: agent-rdp mouse click 690 427
 # Set clipboard text (available when you paste on Windows)
 agent-rdp clipboard set "Hello from CLI"
 
+# Paste text into the focused window; fails if Windows does not take it
+agent-rdp clipboard paste "Hello from CLI"
+
 # Get clipboard text (after copying on Windows)
 agent-rdp clipboard get
 
@@ -386,6 +389,7 @@ await rdp.scroll.up({ x: 500, y: 300 });  // Scroll at position
 
 // Clipboard
 await rdp.clipboard.set({ text: 'text to copy' });
+await rdp.clipboard.paste({ text: 'text to paste' }); // throws if nothing was pasted
 const text = await rdp.clipboard.get();
 
 // Locate text using OCR

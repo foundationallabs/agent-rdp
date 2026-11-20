@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0
+
+### Features
+
+* `clipboard paste` (SDK: `clipboard.paste({ text })`) pastes text into the focused window with Ctrl+V and fails with `clipboard_error`, having pasted nothing, when the remote does not take it. `clipboard set` followed by a Ctrl+V reports success even when the clipboard channel is broken, and the paste then lands nothing for the rest of the session. `paste` instead:
+  * fails at once when the remote never finished setting up the clipboard channel;
+  * offers the text and presses Ctrl+V only after the remote accepts the offer (up to 2 s);
+  * waits up to 2 s for the remote to ask for the text. A request any time after the offer counts, since a clipboard history on the remote can fetch the text before the paste. When none comes, it withdraws the text, so a late request pastes nothing and the caller can type the text instead without doubling it.
+
 ## 0.10.2
 
 ### Bug Fixes

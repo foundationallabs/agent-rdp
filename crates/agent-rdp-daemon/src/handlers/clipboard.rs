@@ -35,5 +35,14 @@ pub async fn handle(
                 Err(e) => Response::error(ErrorCode::ClipboardError, format!("Failed to set clipboard: {}", e)),
             }
         }
+
+        ClipboardRequest::Paste { text } => {
+            let paster = rdp.clipboard_paster();
+            drop(session);
+            match paster.paste(text).await {
+                Ok(()) => Response::ok(),
+                Err(e) => Response::error(ErrorCode::ClipboardError, format!("Failed to paste: {}", e)),
+            }
+        }
     }
 }

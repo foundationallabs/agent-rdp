@@ -3,4 +3,4 @@
 /**
  * Clipboard operation request.
  */
-export type ClipboardRequest = { "action": "get" } | { "action": "set", text: string, };
+export type ClipboardRequest = { "action": "get" } | { "action": "set", text: string, } | { "action": "paste", text: string, };

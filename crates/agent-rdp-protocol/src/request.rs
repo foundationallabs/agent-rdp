@@ -346,6 +346,10 @@ pub enum ClipboardRequest {
 
     /// Set clipboard text content.
     Set { text: String },
+
+    /// Paste text into the focused window with Ctrl+V. Fails, having pasted nothing, when the
+    /// remote does not take the text.
+    Paste { text: String },
 }
 
 /// Drive mapping operation request.
