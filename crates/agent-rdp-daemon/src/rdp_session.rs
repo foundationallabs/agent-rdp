@@ -436,6 +436,46 @@ impl SessionDesktop {
     }
 }
 
+/// How long a paste waits for each answer from the remote clipboard. A working channel answers
+/// in well under a second.
+const PASTE_STEP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Pastes text into the remote's focused window, usable without the session lock (the stream
+/// server takes that lock for every frame, and a paste waits on the remote).
+pub struct ClipboardPaster {
+    command_tx: mpsc::Sender<SessionCommand>,
+    clipboard: Arc<parking_lot::Mutex<clipboard::ClipboardState>>,
+}
+
+impl ClipboardPaster {
+    /// Paste `text` with Ctrl+V; an error means nothing was pasted.
+    pub async fn paste(&self, text: String) -> Result<(), clipboard::PasteError> {
+        clipboard::paste_and_confirm(
+            &self.clipboard,
+            PASTE_STEP_TIMEOUT,
+            clipboard_set(&self.command_tx, text),
+            send_key_press(&self.command_tx, "ctrl+v"),
+        )
+        .await
+    }
+}
+
+async fn clipboard_set(
+    command_tx: &mpsc::Sender<SessionCommand>,
+    text: String,
+) -> Result<(), RdpError> {
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    command_tx
+        .send(SessionCommand::ClipboardSet { text, response_tx })
+        .await
+        .map_err(|_| RdpError::SessionClosed)?;
+
+    response_rx
+        .await
+        .map_err(|_| RdpError::SessionClosed)?
+        .map_err(RdpError::ProtocolError)
+}
+
 fn logon_unconfirmed_after(window: Duration) -> RdpError {
     warn!("No login confirmation from the server within {window:?}; ending the session");
     RdpError::AuthenticationFailed(AuthFailureReason::LogonUnconfirmed)
@@ -883,16 +923,14 @@ impl RdpSession {
 
     /// Set clipboard text (will be available when remote pastes).
     pub async fn clipboard_set(&self, text: String) -> Result<(), RdpError> {
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        self.command_tx
-            .send(SessionCommand::ClipboardSet { text, response_tx })
-            .await
-            .map_err(|_| RdpError::SessionClosed)?;
+        clipboard_set(&self.command_tx, text).await
+    }
 
-        response_rx
-            .await
-            .map_err(|_| RdpError::SessionClosed)?
-            .map_err(|e| RdpError::ProtocolError(e))
+    pub fn clipboard_paster(&self) -> ClipboardPaster {
+        ClipboardPaster {
+            command_tx: self.command_tx.clone(),
+            clipboard: Arc::clone(&self.shared.read().clipboard),
+        }
     }
 
     /// Get clipboard text from remote.

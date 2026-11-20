@@ -23,6 +23,7 @@ pub async fn run(
     let clipboard_request = match &args.action {
         ClipboardAction::Get => ClipboardRequest::Get,
         ClipboardAction::Set { text } => ClipboardRequest::Set { text: text.clone() },
+        ClipboardAction::Paste { text } => ClipboardRequest::Paste { text: text.clone() },
     };
 
     let request = Request::Clipboard(clipboard_request);

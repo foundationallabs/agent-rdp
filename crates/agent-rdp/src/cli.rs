@@ -309,6 +309,12 @@ pub enum ClipboardAction {
         /// Text to set
         text: String,
     },
+
+    /// Paste text into the focused window, failing if the remote does not take it
+    Paste {
+        /// Text to paste
+        text: String,
+    },
 }
 
 /// Drive command arguments.
